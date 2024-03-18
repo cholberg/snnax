@@ -1,0 +1,49 @@
+[tool.poetry]
+name = "event-rde"
+version = "0.1.0"
+description = ""
+authors = ["cholberg <cholberg24@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.3.3"
+pytest = "^8.1.1"
+pre-commit = "^3.6.2"
+pyright = "^1.1.354"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+
+[tool.ruff]
+line-length = 120
+
+exclude = ["jupyter_notebook_config.py"]
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+]
+ignore = [
+    "F722"
+]
+
+[tool.ruff.isort]
+order-by-type = true
+relative-imports-order = "closest-to-furthest"
+extra-standard-library = ["typing"]
+section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+known-first-party = []
+
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
