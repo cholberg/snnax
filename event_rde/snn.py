@@ -11,6 +11,9 @@ import optimistix as optx
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float, Int, PyTree, Real
 
+from .paths import SpikeTrain
+from .solution import Solution
+
 
 class NetworkState(eqx.Module):
     ts: Array
@@ -77,7 +80,9 @@ class SpikingNeuralNet(eqx.Module):
                 if yp == path:
                     return yl[2]
 
-        self.cond_fn = jtu.tree_map_with_path(lambda path, _: ft.partial(cond_fn, path=path), self.neurons)
+        self.cond_fn = jtu.tree_map_with_path(
+            lambda path, _: ft.partial(cond_fn, path=path), self.neurons
+        )
 
         if self.sigma is not None:
 
@@ -152,7 +157,9 @@ class SpikingNeuralNet(eqx.Module):
 
             event_mask = sol.event_mask
             event_types = state.event_types
-            event_types = jtu.tree_map(lambda et, em: et.at[state.num_spikes].set(em), event_types, event_mask)
+            event_types = jtu.tree_map(
+                lambda et, em: et.at[state.num_spikes].set(em), event_types, event_mask
+            )
             new_state = eqx.tree_at(lambda s: s.event_mask, new_state, event_mask)
             new_state = eqx.tree_at(lambda s: s.event_types, new_state, event_types)
 
@@ -165,7 +172,9 @@ class SpikingNeuralNet(eqx.Module):
 
             yevent = jtu.tree_map(lambda _y: _y[-1], sol.ys)
             event_idx = jnp.argmax(jnp.array(jtu.tree_leaves(event_mask)))
-            w_update = jax.lax.dynamic_slice(self.w, (event_idx, 0), (1, self.num_neurons)).reshape((-1,))
+            w_update = jax.lax.dynamic_slice(self.w, (event_idx, 0), (1, self.num_neurons)).reshape(
+                (-1,)
+            )
             w_update = jtu.build_tree(jtu.tree_structure(self.neurons), w_update)
             ytrans = jtu.tree_map(ft.partial(trans_fn, key=trans_key), w_update, yevent, event_mask)
             yevents = state.yevents
@@ -188,4 +197,21 @@ class SpikingNeuralNet(eqx.Module):
 
         final_state = jax.lax.while_loop(stop_fn, body_fun, init_state)
 
-        return final_state
+        ys = final_state.ys
+        ts = final_state.ts
+        spike_times = final_state.tevents
+        spike_marks = final_state.event_types
+        spike_values = final_state.yevents
+        num_spikes = final_state.num_spikes
+        spike_train = SpikeTrain(t0, t1, spike_times, spike_marks)
+        sol = Solution(
+            ys=ys,
+            ts=ts,
+            spike_times=spike_times,
+            spike_marks=spike_marks,
+            spike_values=spike_values,
+            spike_train=spike_train,
+            num_spikes=num_spikes,
+            max_spikes=max_spikes,
+        )
+        return sol
