@@ -17,9 +17,10 @@ class SpikeTrain(AbstractPath):
         self.t1 = t1
         self.num_spikes = spike_times.shape[0]
         self.spike_times = jnp.insert(spike_times, 0, t0)
-        self.spike_cumsum = jtu.tree_map(
+        spike_cumsum = jtu.tree_map(
             lambda x: jnp.cumsum(jnp.insert(x, 0, jnp.array(False))), spike_mask
         )
+        self.spike_cumsum = jtu.tree_map(lambda x: jnp.array(x, dtype=float), spike_cumsum)
 
     def evaluate(self, t0, t1=None, left=True):
         del left
