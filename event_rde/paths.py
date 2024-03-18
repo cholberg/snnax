@@ -15,9 +15,11 @@ class SpikeTrain(AbstractPath):
     def __init__(self, t0, t1, spike_times, spike_mask):
         self.t0 = t0
         self.t1 = t1
-        self.spike_times = spike_times
         self.num_spikes = spike_times.shape[0]
-        self.spike_cumsum = jtu.tree_map(lambda x: jnp.cumsum(x), spike_mask)
+        self.spike_times = jnp.insert(spike_times, 0, t0)
+        self.spike_cumsum = jtu.tree_map(
+            lambda x: jnp.cumsum(jnp.insert(x, 0, jnp.array(False))), spike_mask
+        )
 
     def evaluate(self, t0, t1=None, left=True):
         del left
@@ -26,5 +28,6 @@ class SpikeTrain(AbstractPath):
             assert t1 <= self.t1
             return self.evaluate(t1 - t0)
         idx = jnp.searchsorted(self.spike_times, t0)
+        idx = jnp.where(idx > 0, idx - 1, idx)
         out = jtu.tree_map(lambda x: jax.lax.dynamic_slice(x, (idx,), (1,))[0], self.spike_cumsum)
         return out
