@@ -12,10 +12,6 @@ from jax.typing import ArrayLike
 from jaxtyping import Array, Float, Int, PyTree, Real
 
 
-def _is_none(x):
-    return x is None
-
-
 class NetworkState(eqx.Module):
     ts: Array
     ys: PyTree[Array]
