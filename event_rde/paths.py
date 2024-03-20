@@ -24,9 +24,7 @@ class SpikeTrain(AbstractPath):
 
     def evaluate(self, t0, t1=None, left=True):
         del left
-        assert t0 >= self.t0
         if t1 is not None:
-            assert t1 <= self.t1
             return self.evaluate(t1 - t0)
         idx = jnp.searchsorted(self.spike_times, t0)
         idx = jnp.where(idx > 0, idx - 1, idx)

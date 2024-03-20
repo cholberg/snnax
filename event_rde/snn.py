@@ -41,7 +41,7 @@ def get_switch(collection, idx, flatten_one=False):
 
 def _build_w(w, neurons, key):
     num_neurons = len(neurons)
-    w_a = jr.normal(key, (num_neurons, num_neurons))
+    w_a = jr.uniform(key, (num_neurons, num_neurons), minval=0.5)
     if w is None:
         w_d = tuple(tuple(w_a[i, j] for j in neurons) for i in neurons)
     elif isinstance(jtu.tree_leaves(w)[0], bool):
@@ -296,6 +296,8 @@ class SpikingNeuralNet(eqx.Module):
 
 
 def _build_forward_w(in_size, out_size, width_size, depth):
+    if depth <= 1:
+        width_size = out_size
     num_neurons = in_size + width_size * (depth - 1) + out_size
     neurons = tuple(i for i in range(num_neurons))
     children = tuple(i for i in range(in_size, in_size + width_size))
@@ -329,7 +331,24 @@ class FeedForwardSNN(SpikingNeuralNet):
         w = _build_forward_w(self.in_size, self.out_size, self.width_size, self.depth)
         super().__init__(num_neurons, intensity_fn, w=w, key=key, diffusion=diffusion)
 
-    def __call__(self, input_current, ts, max_spikes, *, key):
+    def __call__(
+        self,
+        input_current: Callable[..., Float[Array, " input_size"]],
+        ts: Float[Array, ""],
+        max_spikes: int,
+        key: Any,
+        return_type: str = "spike_train",
+    ):
         nn_minus_input = self.width_size * (self.depth - 1) + self.out_size
-        input_current = (*input_current, *tuple(lambda t: 0.0 for _ in range(nn_minus_input)))
-        return super().__call__(input_current, ts, max_spikes, key=key)
+        nn_minus_output = nn_minus_input - self.out_size + self.in_size
+        _input_current = tuple(
+            lambda t, n=n: input_current(t)[n] for n in self.neurons[: self.in_size]
+        )
+        _input_current = (*_input_current, *tuple(lambda t: 0.0 for _ in range(nn_minus_input)))
+        out = super().__call__(_input_current, ts, max_spikes, key=key)
+        if return_type == "spike_train":
+            spike_trains = jnp.array(jax.vmap(out.spike_train.evaluate)(ts)).T
+            spike_trains = spike_trains[:, nn_minus_output:]
+            return spike_trains
+        elif return_type == "solution":
+            return out
