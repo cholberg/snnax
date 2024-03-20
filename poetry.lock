@@ -2775,6 +2775,28 @@ testing = ["build[virtualenv]", "filelock (>=3.4.0)", "importlib-metadata", "ini
 testing-integration = ["build[virtualenv] (>=1.0.3)", "filelock (>=3.4.0)", "jaraco.envs (>=2.2)", "jaraco.path (>=3.2.0)", "packaging (>=23.2)", "pytest", "pytest-enabler", "pytest-xdist", "tomli", "virtualenv (>=13.0.0)", "wheel"]
 
 [[package]]
+name = "signax"
+version = "0.2.1"
+description = "Differentiable signature calculations in JAX."
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "signax-0.2.1-py3-none-any.whl", hash = "sha256:62593038cc7a6c0822c7529279f802dd7d44db509c7cf7cdc4b8d46ad82bbc04"},
+    {file = "signax-0.2.1.tar.gz", hash = "sha256:bd0a9c43433f482abd1e56be3145727d9fbe61d1c5451f00d8fa36278ad72c2c"},
+]
+
+[package.dependencies]
+equinox = "*"
+jax = ">=0.3.10"
+jaxlib = "*"
+jaxtyping = "*"
+
+[package.extras]
+dev = ["pytest (>=6)", "pytest-cov (>=3)"]
+docs = ["furo", "myst-parser (>=0.13)", "sphinx (>=4.0)", "sphinx-book-theme (>=0.1.0)", "sphinx-copybutton"]
+test = ["pytest (>=6)", "pytest-cov (>=3)"]
+
+[[package]]
 name = "six"
 version = "1.16.0"
 description = "Python 2 and 3 compatibility utilities"
@@ -3055,4 +3077,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.11"
-content-hash = "b2d6927762f21eb64b3c9638abab1c6fdfcf488cf6c1ca3d0763fb1e26f77120"
+content-hash = "389f60728f140c79377d3033a100423587055aeef60fd70bc4dd991444224b2d"
