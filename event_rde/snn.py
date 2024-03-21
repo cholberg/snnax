@@ -1,5 +1,5 @@
 import functools as ft
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional
 
 import diffrax
 import equinox as eqx
@@ -7,24 +7,25 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import jax.tree_util as jtu
+import numpy as np
 import optimistix as optx
 from jax.typing import ArrayLike
-from jaxtyping import Array, Float, Int, PyTree, Real
+from jaxtyping import Array, Bool, Float, Int, Real
 
 from .paths import SpikeTrain
 from .solution import Solution
 
 
 class NetworkState(eqx.Module):
-    ts: Array
-    ys: PyTree[Array]
-    tevents: Array
-    yevents: PyTree[Array]
+    ts: Real[Array, " times"]
+    ys: Float[Array, "times neurons 3"]
+    tevents: Real[Array, " spikes"]
+    yevents: Float[Array, "spikes neurons 3"]
     t0: Real
-    y0: PyTree[ArrayLike]
+    y0: Float[Array, "neurons 3"]
     num_spikes: Int
-    event_mask: PyTree[bool]
-    event_types: PyTree[Array]
+    event_mask: List[bool]
+    event_types: List[Array]
     key: Any
 
 
@@ -39,16 +40,11 @@ def get_switch(collection, idx, flatten_one=False):
     return jax.lax.switch(idx, funcs)
 
 
-def _build_w(w, neurons, key):
-    num_neurons = len(neurons)
-    w_a = jr.uniform(key, (num_neurons, num_neurons), minval=0.5)
-    if w is None:
-        w_d = tuple(tuple(w_a[i, j] for j in neurons) for i in neurons)
-    elif isinstance(jtu.tree_leaves(w)[0], bool):
-        w_d = tuple(tuple(w_a[i, j] if w[i][j] else None for j in neurons) for i in neurons)
-    else:
-        w_d = w
-    return w_d
+def _build_w(w, network, key):
+    if w is not None:
+        return w
+    w_a = jr.uniform(key, network.shape, minval=0.5)
+    return w_a.at[network].set(0.0)
 
 
 def _build_initial(x, neurons, key):
@@ -88,19 +84,17 @@ def _inner_trans_fn(ev_outer, w, y, event_mask, key, v_reset):
 
 
 class SpikingNeuralNet(eqx.Module):
-    neurons: Tuple[Int, ...]
     num_neurons: Int
-    w: Tuple[Tuple[Optional[Float], ...], ...]
+    w: Float[Array, "neurons neurons"]
+    network: Bool[ArrayLike, "neurons neurons"]
     v_reset: Float
     alpha: Float
-    v0: Tuple[Float, ...]
-    i0: Tuple[Float, ...]
     mu: Float[Array, " 2"]
-    drift_vf: Callable[..., Tuple[Float[Array, " 3"], ...]]
-    cond_fn: Tuple[Callable[..., Float], ...]
+    drift_vf: Callable[..., Float[Array, "neurons 3"]]
+    cond_fn: List[Callable[..., Float]]
     intensity_fn: Callable[..., Float]
     sigma: Optional[Float[Array, "2 2"]]
-    diffusion_vf: Optional[Callable[..., Tuple[Float[Array, "3 2"], ...]]]
+    diffusion_vf: Optional[Callable[..., Float[Array, "neurons 3 2*neurons"]]]
 
     def __init__(
         self,
@@ -108,18 +102,14 @@ class SpikingNeuralNet(eqx.Module):
         intensity_fn: Callable[..., Float],
         v_reset: Float = 1.0,
         alpha: Float = 1e-2,
-        v0: Optional[Tuple[Optional[Float], ...]] = None,
-        i0: Optional[Tuple[Optional[Float], ...]] = None,
-        w: Optional[
-            Union[Tuple[Tuple[Optional[Float], ...], ...], Tuple[Tuple[bool, ...], ...]]
-        ] = None,
+        w: Optional[Float[Array, "neurons neurons"]] = None,
+        network: Optional[Bool[ArrayLike, "neurons neurons"]] = None,
         mu: Optional[Float[Array, " 2"]] = None,
         diffusion: bool = False,
         sigma: Optional[Float[Array, "2 2"]] = None,
         key: Optional[Any] = None,
     ):
         self.num_neurons = num_neurons
-        self.neurons = tuple(range(self.num_neurons))
         self.intensity_fn = intensity_fn
         self.v_reset = v_reset
         self.alpha = alpha
@@ -127,87 +117,100 @@ class SpikingNeuralNet(eqx.Module):
         if key is None:
             key = jax.random.PRNGKey(0)
 
-        v0_key, i0_key, w_key, mu_key, sigma_key = jr.split(key, 5)
-        self.v0 = _build_initial(v0, self.neurons, v0_key)
-        self.i0 = _build_initial(i0, self.neurons, i0_key)
-        self.w = _build_w(w, self.neurons, w_key)
+        w_key, mu_key, sigma_key = jr.split(key, 3)
+
+        if network is None:
+            network = np.full((num_neurons, num_neurons), False)
+
+        self.w = _build_w(w, network, w_key)
+        self.network = network
 
         if mu is None:
             mu = jr.uniform(mu_key, (2,), minval=0.5)
 
         self.mu = mu
 
+        def drift_vf(t, y, input_current):
+            ic = input_current(t)
+
+            @jax.vmap
+            def _vf(y, ic):
+                mu1, mu2 = self.mu
+                v, i, _ = y
+                v_out = mu1 * (i + ic - v)
+                i_out = -mu2 * i
+                s_out = self.intensity_fn(v)
+                return jnp.array([v_out, i_out, s_out])
+
+            return _vf(y, ic)
+
+        self.drift_vf = drift_vf
+
         if diffusion:
             if sigma is None:
                 sigma = jr.normal(sigma_key, (2, 2))
                 sigma = jnp.dot(sigma, sigma.T)
+                self.sigma = sigma
 
             def diffusion_vf(t, y, args):
-                return jtu.tree_map(lambda x: jnp.vstack([sigma, jnp.zeros((2,))]), y)
+                sigma_zero = jnp.zeros((3, 2, num_neurons))
+
+                @jax.vmap
+                def _vf(k):
+                    return sigma_zero.at[:2, :, k : (k + 1)].set(self.sigma)
+
+                return _vf(jnp.arange(self.num_neurons))
 
             self.diffusion_vf = diffusion_vf
         else:
-            sigma = None
+            self.sigma = None
             self.diffusion_vf = None
 
-        self.sigma = sigma
-
-        def drift_vf(t, y, input_current):
-            def _vf(y, input_current):
-                mu1, mu2 = self.mu
-                v, i, s = y
-                v_out = mu1 * (i - v)
-                i_out = -mu2 * i
-                if input is not None:
-                    v_out = v_out + mu1 * input_current(t)
-                s_out = self.intensity_fn(v)
-                return jnp.array([v_out, i_out, s_out])
-
-            return jtu.tree_map(_vf, y, input_current)
-
-        self.drift_vf = drift_vf
-
         def cond_fn(state, y, n, **kwargs):
-            return y[n][2]
+            return y[n, 2]
 
-        self.cond_fn = jtu.tree_map(lambda n: ft.partial(cond_fn, n=n), self.neurons)
+        self.cond_fn = [ft.partial(cond_fn, n=n) for n in range(self.num_neurons)]
 
-    def __call__(self, input_current, ts, max_spikes, *, key):
+    def __call__(self, input_current, ts, v0, i0, max_spikes, *, key):
         t0 = ts[0]
         t1 = ts[-1]
         key, init_key, bm_key = jr.split(key, 3)
-        s0 = jtu.tree_map(
-            lambda n: jnp.log(jr.uniform(jr.fold_in(init_key, n))) - self.alpha, self.neurons
-        )
-        y0 = jtu.tree_map(lambda v, i, s: jnp.array([v, i, s]), self.v0, self.i0, s0)
-        ys = jtu.tree_map(lambda _y: jnp.tile(jnp.full_like(_y, jnp.inf), (ts.shape[0], 1)), y0)
-        ys = jtu.tree_map(lambda _ys, _y: _ys.at[0].set(_y), ys, y0)
+        s0 = jnp.log(jr.uniform(init_key, (self.num_neurons,))) - self.alpha
+        y0 = jnp.vstack([v0, i0, s0]).T
+        ys = jnp.full((ts.shape[0], self.num_neurons, 3), jnp.inf)
+        ys = ys.at[0, :, :].set(y0)
         tevents = jnp.full((max_spikes,), jnp.inf)
-        yevents = jtu.tree_map(lambda _y: jnp.tile(jnp.full_like(_y, jnp.inf), (max_spikes, 1)), y0)
+        yevents = jnp.full((max_spikes, self.num_neurons, 3), jnp.inf)
         event_mask = jtu.tree_map(lambda _y: False, self.cond_fn)
-        event_types = jtu.tree_map(lambda _: jnp.full((max_spikes,), False), self.neurons)
+        event_types = [jnp.full((max_spikes,), False) for n in range(self.num_neurons)]
         init_state = NetworkState(ts, ys, tevents, yevents, t0, y0, 0, event_mask, event_types, key)
 
         dt0 = 0.01
         vf = diffrax.ODETerm(self.drift_vf)
         if self.diffusion_vf is not None:
-
-            def shape_map(_y):
-                return jtu.tree_map(lambda x: self.sigma[0, :], _y)  # pyright: ignore
-
-            bm_shape = jax.eval_shape(shape_map, y0)
-            bm = diffrax.VirtualBrownianTree(t0, t1, tol=dt0 / 2, shape=bm_shape, key=bm_key)
+            bm = diffrax.VirtualBrownianTree(
+                t0, t1, tol=dt0 / 2, shape=(2, self.num_neurons), key=bm_key
+            )
             cvf = diffrax.ControlTerm(self.diffusion_vf, bm)
             terms = diffrax.MultiTerm(vf, cvf)
         else:
             terms = vf
-
         root_finder = optx.Newton(1e-2, 1e-2, optx.rms_norm)
         event = diffrax.Event(self.cond_fn, root_finder)
         solver = diffrax.Euler()
+        w_update = self.w.at[self.network].set(0.0)
+
+        @jax.vmap
+        def trans_fn(y, w, ev, key):
+            v, i, s = y
+            v_out = v - jnp.where(ev, self.v_reset, 0.0)
+            i_out = i + w
+            s_out = jnp.where(ev, jnp.log(jr.uniform(key)) - self.alpha, s)
+            return jnp.array([v_out, i_out, s_out])
 
         def body_fun(state: NetworkState) -> NetworkState:
             new_key, trans_key = jr.split(state.key, 2)
+            trans_key = jr.split(trans_key, self.num_neurons)
             new_state = eqx.tree_at(lambda s: s.key, state, new_key)
 
             _t0 = state.t0
@@ -241,22 +244,17 @@ class SpikingNeuralNet(eqx.Module):
             new_state = eqx.tree_at(lambda s: s.t0, new_state, tevent)
             new_state = eqx.tree_at(lambda s: s.tevents, new_state, tevents)
 
-            yevent = jtu.tree_map(lambda _y: _y[-1], sol.ys)
-            event_idx = jnp.argmax(jnp.array(jtu.tree_leaves(event_mask)))
-            ytrans = jtu.tree_map(
-                ft.partial(
-                    _inner_trans_fn,
-                    y=yevent,
-                    event_mask=event_mask,
-                    key=trans_key,
-                    v_reset=self.v_reset,
-                ),
-                event_mask,
-                self.w,
-            )
-            ytrans = get_switch(ytrans, event_idx, flatten_one=True)
+            assert sol.ys is not None
+            yevent = sol.ys[-1].reshape((self.num_neurons, 3))
+            event_idx = jnp.argmax(jnp.array(event_mask))
+            w_update_row = jax.lax.dynamic_slice(
+                w_update, (event_idx, 0), (1, self.num_neurons)
+            ).reshape((-1,))
+            event_array = jnp.array(event_mask)
+
+            ytrans = trans_fn(yevent, w_update_row, event_array, trans_key)
             yevents = state.yevents
-            yevents = jtu.tree_map(lambda y, _y: y.at[state.num_spikes].set(_y), yevents, yevent)
+            yevents = yevents.at[state.num_spikes].set(yevent)
             new_state = eqx.tree_at(lambda s: s.y0, new_state, ytrans)
             new_state = eqx.tree_at(lambda s: s.yevents, new_state, yevents)
 
@@ -264,8 +262,8 @@ class SpikingNeuralNet(eqx.Module):
             new_state = eqx.tree_at(lambda s: s.num_spikes, new_state, num_spikes)
 
             update_mask = jnp.array((t_seq > _t0) & (t_seq <= tevent)).reshape((-1,))
-            update_mask = jnp.tile(update_mask, (3, 1)).T
-            ys = jtu.tree_map(lambda _ys, __ys: jnp.where(update_mask, __ys, _ys), state.ys, sol.ys)
+            update_mask = jnp.tile(update_mask, (3, self.num_neurons, 1)).T
+            ys = jnp.where(update_mask, sol.ys, state.ys)
             new_state = eqx.tree_at(lambda s: s.ys, new_state, ys)
 
             return new_state
@@ -295,25 +293,21 @@ class SpikingNeuralNet(eqx.Module):
         return sol
 
 
-def _build_forward_w(in_size, out_size, width_size, depth):
+def _build_forward_network(in_size, out_size, width_size, depth):
     if depth <= 1:
         width_size = out_size
     num_neurons = in_size + width_size * (depth - 1) + out_size
-    neurons = tuple(i for i in range(num_neurons))
-    children = tuple(i for i in range(in_size, in_size + width_size))
-    w_in = tuple(tuple(True if i in children else False for i in neurons) for j in range(in_size))
-    w_hidden = ()
-    for n in range(1, depth):
-        children = tuple(i for i in range(in_size + width_size * n, in_size + width_size * (n + 1)))
-        w_hidden = (
-            *w_hidden,
-            *tuple(
-                tuple(True if i in children else False for i in neurons) for j in range(width_size)
-            ),
-        )
-    w_out = tuple(tuple(False for i in neurons) for j in range(out_size))
-    w = (*w_in, *w_hidden, *w_out)
-    return w
+    network_out = jnp.full((num_neurons, num_neurons), True)
+    layer_idx = [0] + [in_size] + [width_size] * (depth - 1) + [out_size]
+    layer_idx = jnp.cumsum(jnp.array(layer_idx))
+    for i in range(depth):
+        lrows = layer_idx[i]
+        urows = layer_idx[i + 1]
+        lcols = layer_idx[i + 1]
+        ucols = layer_idx[i + 2]
+        network_fill = jnp.full((urows - lrows, ucols - lcols), False)
+        network_out = network_out.at[lrows:urows, lcols:ucols].set(network_fill)
+    return network_out
 
 
 class FeedForwardSNN(SpikingNeuralNet):
@@ -328,24 +322,26 @@ class FeedForwardSNN(SpikingNeuralNet):
         self.width_size = width_size
         self.depth = depth
         num_neurons = self.in_size + self.width_size * (self.depth - 1) + self.out_size
-        w = _build_forward_w(self.in_size, self.out_size, self.width_size, self.depth)
-        super().__init__(num_neurons, intensity_fn, w=w, key=key, diffusion=diffusion)
+        network = _build_forward_network(self.in_size, self.out_size, self.width_size, self.depth)
+        super().__init__(num_neurons, intensity_fn, network=network, key=key, diffusion=diffusion)
 
     def __call__(
         self,
         input_current: Callable[..., Float[Array, " input_size"]],
         ts: Float[Array, ""],
+        v0: Float[Array, " neurons"],
+        i0: Float[Array, " neurons"],
         max_spikes: int,
         key: Any,
         return_type: str = "spike_train",
     ):
         nn_minus_input = self.width_size * (self.depth - 1) + self.out_size
         nn_minus_output = nn_minus_input - self.out_size + self.in_size
-        _input_current = tuple(
-            lambda t, n=n: input_current(t)[n] for n in self.neurons[: self.in_size]
-        )
-        _input_current = (*_input_current, *tuple(lambda t: 0.0 for _ in range(nn_minus_input)))
-        out = super().__call__(_input_current, ts, max_spikes, key=key)
+
+        def _input_current(t: Float) -> Array:
+            return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
+
+        out = super().__call__(_input_current, ts, v0, i0, max_spikes, key=key)
         if return_type == "spike_train":
             spike_trains = jnp.array(jax.vmap(out.spike_train.evaluate)(ts)).T
             spike_trains = spike_trains[:, nn_minus_output:]

@@ -42,7 +42,8 @@ select = [
     "B",  # flake8-bugbear
 ]
 ignore = [
-    "F722"
+    "F722",
+    "C901",
 ]
 
 [tool.ruff.isort]
