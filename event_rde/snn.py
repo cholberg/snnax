@@ -29,34 +29,11 @@ class NetworkState(eqx.Module):
     key: Any
 
 
-def _is_none(x):
-    return x is None
-
-
-def get_switch(collection, idx, flatten_one=False):
-    if flatten_one:
-        collection, _ = eqx.tree_flatten_one_level(collection)
-    funcs = [lambda i=i: collection[i] for i in range(len(collection))]
-    return jax.lax.switch(idx, funcs)
-
-
 def _build_w(w, network, key):
     if w is not None:
         return w
     w_a = jr.uniform(key, network.shape, minval=0.5)
     return w_a.at[network].set(0.0)
-
-
-def _build_initial(x, neurons, key):
-    if x is None:
-        out = jtu.tree_map(lambda n: jr.uniform(jr.fold_in(key, n), maxval=0.1), neurons)
-    else:
-        out = jtu.tree_map(
-            lambda n, _x: jr.uniform(jr.fold_in(key, n), maxval=0.1) if _x is None else _x,
-            neurons,
-            x,
-        )
-    return out
 
 
 def _inner_trans_fn(ev_outer, w, y, event_mask, key, v_reset):
