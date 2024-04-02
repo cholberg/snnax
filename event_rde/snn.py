@@ -66,12 +66,12 @@ class SpikingNeuralNet(eqx.Module):
     network: Bool[ArrayLike, "neurons neurons"]
     v_reset: Float
     alpha: Float
-    mu: Float[Array, " 2"]
-    drift_vf: Callable[..., Float[Array, "neurons 3"]]
+    mu: Float[ArrayLike, " 2"]
+    drift_vf: Callable[..., Float[ArrayLike, "neurons 3"]]
     cond_fn: List[Callable[..., Float]]
     intensity_fn: Callable[..., Float]
-    sigma: Optional[Float[Array, "2 2"]]
-    diffusion_vf: Optional[Callable[..., Float[Array, "neurons 3 2*neurons"]]]
+    sigma: Optional[Float[ArrayLike, "2 2"]]
+    diffusion_vf: Optional[Callable[..., Float[ArrayLike, "neurons 3 2*neurons"]]]
 
     def __init__(
         self,
@@ -81,9 +81,9 @@ class SpikingNeuralNet(eqx.Module):
         alpha: Float = 1e-2,
         w: Optional[Float[Array, "neurons neurons"]] = None,
         network: Optional[Bool[ArrayLike, "neurons neurons"]] = None,
-        mu: Optional[Float[Array, " 2"]] = None,
+        mu: Optional[Float[ArrayLike, " 2"]] = None,
         diffusion: bool = False,
-        sigma: Optional[Float[Array, "2 2"]] = None,
+        sigma: Optional[Float[ArrayLike, "2 2"]] = None,
         key: Optional[Any] = None,
     ):
         self.num_neurons = num_neurons
@@ -112,7 +112,7 @@ class SpikingNeuralNet(eqx.Module):
 
             @jax.vmap
             def _vf(y, ic):
-                mu1, mu2 = self.mu
+                mu1, mu2 = self.mu  # type: ignore
                 v, i, _ = y
                 v_out = mu1 * (i + ic - v)
                 i_out = -mu2 * i
@@ -227,9 +227,11 @@ class SpikingNeuralNet(eqx.Module):
             w_update_row = jax.lax.dynamic_slice(
                 w_update, (event_idx, 0), (1, self.num_neurons)
             ).reshape((-1,))
+            # jax.debug.print("{x}", x=w_update_row)
             event_array = jnp.array(event_mask)
 
             ytrans = trans_fn(yevent, w_update_row, event_array, trans_key)
+            # jax.debug.print("{x}", x=ytrans - yevent)
             yevents = state.yevents
             yevents = yevents.at[state.num_spikes].set(yevent)
             new_state = eqx.tree_at(lambda s: s.y0, new_state, ytrans)
@@ -240,7 +242,9 @@ class SpikingNeuralNet(eqx.Module):
 
             update_mask = jnp.array((t_seq > _t0) & (t_seq <= tevent)).reshape((-1,))
             update_mask = jnp.tile(update_mask, (3, self.num_neurons, 1)).T
-            ys = jnp.where(update_mask, sol.ys, state.ys)
+            ys = sol.ys
+            ys = jnp.where(update_mask, ys, state.ys)
+            ys = ys.at[jnp.sum(state.ts < _t0) - 1].set(_y0)  # pyright: ignore
             new_state = eqx.tree_at(lambda s: s.ys, new_state, ys)
 
             return new_state
@@ -305,9 +309,9 @@ class FeedForwardSNN(SpikingNeuralNet):
     def __call__(
         self,
         input_current: Callable[..., Float[Array, " input_size"]],
-        ts: Float[Array, ""],
-        v0: Float[Array, " neurons"],
-        i0: Float[Array, " neurons"],
+        ts: Float[ArrayLike, ""],
+        v0: Float[ArrayLike, " neurons"],
+        i0: Float[ArrayLike, " neurons"],
         max_spikes: int,
         key: Any,
         return_type: str = "spike_train",
@@ -320,7 +324,7 @@ class FeedForwardSNN(SpikingNeuralNet):
 
         out = super().__call__(_input_current, ts, v0, i0, max_spikes, key=key)
         if return_type == "spike_train":
-            spike_trains = jnp.array(jax.vmap(out.spike_train.evaluate)(ts)).T
+            spike_trains = jnp.array(jax.vmap(out.spike_train.evaluate)(ts))
             spike_trains = spike_trains[:, nn_minus_output:]
             return spike_trains
         elif return_type == "solution":
