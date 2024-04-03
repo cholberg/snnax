@@ -20,14 +20,19 @@ from .solution import Solution
 class NetworkState(eqx.Module):
     ts: Real[Array, " times"]
     ys: Float[Array, "times neurons 3"]
-    tevents: Real[Array, " spikes"]
-    yevents: Float[Array, "spikes neurons 3"]
+    tevents: eqxi.MaybeBuffer[Real[Array, " spikes"]]
+    yevents: eqxi.MaybeBuffer[Float[Array, "spikes neurons 3"]]
     t0: Real
     y0: Float[Array, "neurons 3"]
     num_spikes: Int
     event_mask: List[bool]
-    event_types: List[Array]
+    event_types: eqxi.MaybeBuffer[Bool[Array, "spikes neurons"]]
     key: Any
+
+
+def buffers(state: NetworkState):
+    assert type(state) is NetworkState
+    return state.tevents, state.yevents, state.event_types
 
 
 def _build_w(w, network, key):
@@ -64,7 +69,7 @@ def _inner_trans_fn(ev_outer, w, y, event_mask, key, v_reset):
 class SpikingNeuralNet(eqx.Module):
     num_neurons: Int
     w: Float[Array, "neurons neurons"]
-    network: Bool[ArrayLike, "neurons neurons"]
+    network: Bool[ArrayLike, "neurons neurons"] = eqx.field(static=True)
     v_reset: Float
     alpha: Float
     mu: Float[ArrayLike, " 2"]
@@ -149,18 +154,18 @@ class SpikingNeuralNet(eqx.Module):
 
         self.cond_fn = [ft.partial(cond_fn, n=n) for n in range(self.num_neurons)]
 
-    def __call__(self, input_current, ts, v0, i0, max_spikes, *, key):
-        t0 = ts[0]
-        t1 = ts[-1]
+    @eqx.filter_jit
+    def __call__(self, input_current, t0, t1, ts, v0, i0, max_spikes, *, key):
+        t0, t1 = float(t0), float(t1)
         key, init_key, bm_key = jr.split(key, 3)
         s0 = jnp.log(jr.uniform(init_key, (self.num_neurons,))) - self.alpha
         y0 = jnp.vstack([v0, i0, s0]).T
         ys = jnp.full((ts.shape[0], self.num_neurons, 3), jnp.inf)
-        ys = ys.at[0, :, :].set(y0)
+        # ys = ys.at[0, :, :].set(y0)
         tevents = jnp.full((max_spikes,), jnp.inf)
         yevents = jnp.full((max_spikes, self.num_neurons, 3), jnp.inf)
         event_mask = jtu.tree_map(lambda _y: False, self.cond_fn)
-        event_types = [jnp.full((max_spikes,), False) for n in range(self.num_neurons)]
+        event_types = jnp.full((max_spikes, self.num_neurons), False)
         init_state = NetworkState(ts, ys, tevents, yevents, t0, y0, 0, event_mask, event_types, key)
 
         dt0 = 0.01
@@ -189,7 +194,6 @@ class SpikingNeuralNet(eqx.Module):
         def body_fun(state: NetworkState) -> NetworkState:
             new_key, trans_key = jr.split(state.key, 2)
             trans_key = jr.split(trans_key, self.num_neurons)
-            new_state = eqx.tree_at(lambda s: s.key, state, new_key)
 
             _t0 = state.t0
             _y0 = state.y0
@@ -207,20 +211,16 @@ class SpikingNeuralNet(eqx.Module):
                 event=event,
             )
 
+            assert sol.event_mask is not None
             event_mask = sol.event_mask
+
             event_types = state.event_types
-            event_types = jtu.tree_map(
-                lambda et, em: et.at[state.num_spikes].set(em), event_types, event_mask
-            )
-            new_state = eqx.tree_at(lambda s: s.event_mask, new_state, event_mask)
-            new_state = eqx.tree_at(lambda s: s.event_types, new_state, event_types)
+            event_types = event_types.at[state.num_spikes].set(jnp.array(event_mask))
 
             assert sol.ts is not None
             tevent = sol.ts[-1]
             tevents = state.tevents
             tevents = tevents.at[state.num_spikes].set(tevent)
-            new_state = eqx.tree_at(lambda s: s.t0, new_state, tevent)
-            new_state = eqx.tree_at(lambda s: s.tevents, new_state, tevents)
 
             assert sol.ys is not None
             yevent = sol.ys[-1].reshape((self.num_neurons, 3))
@@ -235,18 +235,27 @@ class SpikingNeuralNet(eqx.Module):
             # jax.debug.print("{x}", x=ytrans - yevent)
             yevents = state.yevents
             yevents = yevents.at[state.num_spikes].set(yevent)
-            new_state = eqx.tree_at(lambda s: s.y0, new_state, ytrans)
-            new_state = eqx.tree_at(lambda s: s.yevents, new_state, yevents)
 
             num_spikes = state.num_spikes + 1
-            new_state = eqx.tree_at(lambda s: s.num_spikes, new_state, num_spikes)
 
             update_mask = jnp.array((t_seq > _t0) & (t_seq <= tevent)).reshape((-1,))
             update_mask = jnp.tile(update_mask, (3, self.num_neurons, 1)).T
             ys = sol.ys
             ys = jnp.where(update_mask, ys, state.ys)
-            ys = ys.at[jnp.sum(state.ts < _t0) - 1].set(_y0)  # pyright: ignore
-            new_state = eqx.tree_at(lambda s: s.ys, new_state, ys)
+            ys = ys.at[jnp.sum(state.ts < _t0)].set(_y0)  # pyright: ignore
+
+            new_state = NetworkState(
+                ts=state.ts,
+                ys=ys,
+                tevents=tevents,
+                yevents=yevents,
+                t0=tevent,
+                y0=ytrans,
+                num_spikes=num_spikes,
+                event_mask=event_mask,
+                event_types=event_types,
+                key=new_key,
+            )
 
             return new_state
 
@@ -254,7 +263,12 @@ class SpikingNeuralNet(eqx.Module):
             return (state.num_spikes <= max_spikes) & (state.t0 < t1)
 
         final_state = eqxi.while_loop(
-            stop_fn, body_fun, init_state, max_steps=max_spikes, kind="bounded"
+            stop_fn,
+            body_fun,
+            init_state,
+            buffers=buffers,
+            max_steps=max_spikes,
+            kind="checkpointed",
         )
 
         ys = final_state.ys
@@ -281,16 +295,16 @@ def _build_forward_network(in_size, out_size, width_size, depth):
     if depth <= 1:
         width_size = out_size
     num_neurons = in_size + width_size * (depth - 1) + out_size
-    network_out = jnp.full((num_neurons, num_neurons), True)
+    network_out = np.full((num_neurons, num_neurons), True)
     layer_idx = [0] + [in_size] + [width_size] * (depth - 1) + [out_size]
-    layer_idx = jnp.cumsum(jnp.array(layer_idx))
+    layer_idx = np.cumsum(jnp.array(layer_idx))
     for i in range(depth):
         lrows = layer_idx[i]
         urows = layer_idx[i + 1]
         lcols = layer_idx[i + 1]
         ucols = layer_idx[i + 2]
-        network_fill = jnp.full((urows - lrows, ucols - lcols), False)
-        network_out = network_out.at[lrows:urows, lcols:ucols].set(network_fill)
+        network_fill = np.full((urows - lrows, ucols - lcols), False)
+        network_out[lrows:urows, lcols:ucols] = network_fill
     return network_out
 
 
@@ -312,6 +326,8 @@ class FeedForwardSNN(SpikingNeuralNet):
     def __call__(
         self,
         input_current: Callable[..., Float[Array, " input_size"]],
+        t0: Real,
+        t1: Real,
         ts: Float[ArrayLike, ""],
         v0: Float[ArrayLike, " neurons"],
         i0: Float[ArrayLike, " neurons"],
@@ -325,7 +341,7 @@ class FeedForwardSNN(SpikingNeuralNet):
         def _input_current(t: Float) -> Array:
             return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
 
-        out = super().__call__(_input_current, ts, v0, i0, max_spikes, key=key)
+        out = super().__call__(_input_current, t0, t1, ts, v0, i0, max_spikes, key=key)
         if return_type == "spike_train":
             spike_trains = jnp.array(jax.vmap(out.spike_train.evaluate)(ts))
             spike_trains = spike_trains[:, nn_minus_output:]

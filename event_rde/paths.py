@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -18,13 +18,15 @@ def interleave(arr1: Array, arr2: Array) -> Array:
 def marcus_lift(
     t1: RealScalarLike,
     spike_times: Float[Array, " max_spikes"],
-    spike_mask: List[Float[Array, " max_spikes"]],
+    spike_mask: Float[Array, "max_spikes num_neurons"],
 ) -> Float[Array, " 2_max_spikes"]:
-    num_neurons = len(spike_mask)
+    num_neurons = spike_mask.shape[1]
     finite_spikes = jnp.where(jnp.isfinite(spike_times), spike_times, t1).reshape((-1, 1))
-    spike_cumsum = jnp.array(jtu.tree_map(lambda x: jnp.cumsum(x), spike_mask), dtype=jnp.float32).T
+    spike_cumsum = jnp.cumsum(spike_mask, axis=0)
     spike_cumsum_shift = jnp.roll(spike_cumsum, 1, axis=0)
-    spike_cumsum_shift = spike_cumsum_shift.at[0, :].set(jnp.zeros(num_neurons))
+    spike_cumsum_shift = spike_cumsum_shift.at[0, :].set(
+        jnp.zeros(num_neurons, dtype=spike_cumsum_shift.dtype)
+    )
     arr1 = jnp.hstack([finite_spikes, spike_cumsum])
     arr2 = jnp.hstack([finite_spikes, spike_cumsum_shift])
     return jax.vmap(interleave, in_axes=1)(arr1, arr2).T
