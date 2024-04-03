@@ -1,6 +1,7 @@
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
 from .paths import SpikeTrain as SpikeTrain
+from .paths import marcus_lift as marcus_lift
 from .snn import FeedForwardSNN as FeedForwardSNN
 from .snn import NetworkState as NetworkState
 from .snn import SpikingNeuralNet as SpikingNeuralNet
