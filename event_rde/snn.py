@@ -3,6 +3,7 @@ from typing import Any, Callable, List, Optional
 
 import diffrax
 import equinox as eqx
+import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.random as jr
@@ -252,7 +253,9 @@ class SpikingNeuralNet(eqx.Module):
         def stop_fn(state: NetworkState) -> bool:
             return (state.num_spikes <= max_spikes) & (state.t0 < t1)
 
-        final_state = jax.lax.while_loop(stop_fn, body_fun, init_state)
+        final_state = eqxi.while_loop(
+            stop_fn, body_fun, init_state, max_steps=max_spikes, kind="bounded"
+        )
 
         ys = final_state.ys
         ts = final_state.ts
