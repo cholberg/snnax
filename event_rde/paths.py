@@ -16,6 +16,7 @@ def interleave(arr1: Array, arr2: Array) -> Array:
 
 
 def marcus_lift(
+    t0: RealScalarLike,
     t1: RealScalarLike,
     spike_times: Float[Array, " max_spikes"],
     spike_mask: Float[Array, "max_spikes num_neurons"],
@@ -29,7 +30,11 @@ def marcus_lift(
     )
     arr1 = jnp.hstack([finite_spikes, spike_cumsum])
     arr2 = jnp.hstack([finite_spikes, spike_cumsum_shift])
-    return jax.vmap(interleave, in_axes=1)(arr1, arr2).T
+    out = jax.vmap(interleave, in_axes=1)(arr1, arr2).T
+    # Makes sure the path starts at t0
+    out = jnp.roll(out, 1, axis=0)
+    out = out.at[0, :].set(jnp.insert(jnp.zeros(num_neurons), 0, t0))
+    return out
 
 
 class SpikeTrain(AbstractPath):
