@@ -1,7 +1,12 @@
+from .losses import coord_spikes as coord_spikes
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
+from .losses import first_spike_loss as first_spike_loss
+from .losses import spike_MAE_loss as spike_MAE_loss
+from .paths import BrownianPath as BrownianPath
 from .paths import SpikeTrain as SpikeTrain
 from .paths import marcus_lift as marcus_lift
+from .paths import plottable_path as plottable_path
 from .snn import FeedForwardSNN as FeedForwardSNN
 from .snn import NetworkState as NetworkState
 from .snn import SpikingNeuralNet as SpikingNeuralNet
