@@ -1,17 +1,12 @@
-from typing import Optional
-
 import equinox as eqx
-from jaxtyping import Array, Float, PyTree
-
-from .paths import SpikeTrain
+from jaxtyping import Array, Float, Real
 
 
 class Solution(eqx.Module):
-    ys: Optional[PyTree[Array, " neuron"]]
-    ts: Array
+    t1: Real
+    ys: Float[Array, "samples spikes neurons times 3"]
+    ts: Float[Array, "samples spikes neurons times"]
     spike_times: Float[Array, "samples spikes"]
-    spike_marks: Float[Array, "samples spikes neuron"]
-    spike_values: Float[Array, "samples spikes neuron 3"]
-    spike_train: SpikeTrain
+    spike_marks: Float[Array, "samples spikes neurons"]
     num_spikes: int
     max_spikes: int

@@ -5,6 +5,8 @@ import jax.numpy as jnp
 import signax
 from jaxtyping import Array, Float, Real
 
+from .solution import Solution
+
 
 def expected_signature(y: Float[Array, ""], depth: int) -> Array:
     signatures = jax.vmap(ft.partial(signax.signature, depth=depth))(y)
@@ -22,3 +24,43 @@ def expected_signature_loss(
     sig_1 = expected_signature(y_1_trunc, depth)
     sig_2 = expected_signature(y_2_trunc, depth)
     return jnp.mean((sig_1 - sig_2) ** 2)
+
+
+def coord_spikes(sol: Solution) -> Array:
+    spike_times = sol.spike_times
+    spike_times = jnp.where(jnp.isinf(spike_times), sol.t1, spike_times)
+    spike_marks = sol.spike_marks
+
+    @jax.vmap
+    def _outer(st, sm):
+        @ft.partial(jax.vmap, in_axes=1)
+        def _inner(col):
+            out = jnp.full_like(col, sol.t1)
+            out = jnp.where(col, st, out)
+            return out
+
+        return _inner(sm)
+
+    out = _outer(spike_times, spike_marks)
+    assert isinstance(out, Array)
+    return out
+
+
+def first_spike_loss(sol_1: Solution, sol_2: Solution) -> Real:
+    coord_spikes_1 = coord_spikes(sol_1)
+    coord_spikes_2 = coord_spikes(sol_2)
+    return jnp.mean((coord_spikes_1 - coord_spikes_2)[:, :, 0] ** 2)
+
+
+def spike_MAE_loss(sol_1: Solution, sol_2: Solution) -> Real:
+    coord_spikes_1 = coord_spikes(sol_1)
+    coord_spikes_2 = coord_spikes(sol_2)
+    out = jnp.mean(jnp.abs(coord_spikes_1 - coord_spikes_2))
+    return out
+
+
+def spike_MSE_loss(sol_1: Solution, sol_2: Solution) -> Real:
+    coord_spikes_1 = coord_spikes(sol_1)
+    coord_spikes_2 = coord_spikes(sol_2)
+    out = jnp.mean((coord_spikes_1 - coord_spikes_2) ** 2)
+    return out
