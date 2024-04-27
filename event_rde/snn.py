@@ -169,6 +169,7 @@ class SpikingNeuralNet(eqx.Module):
         i0=None,
         num_save=2,
         dt0=0.01,
+        max_steps=1000,
     ):
         t0, t1 = float(t0), float(t1)
         _t0 = jnp.full((num_samples,), t0)
@@ -247,6 +248,7 @@ class SpikingNeuralNet(eqx.Module):
                     # stepsize_controller=stepsize_controller,
                     saveat=saveat,
                     event=event,
+                    max_steps=max_steps,
                 )
 
                 assert sol.event_mask is not None
