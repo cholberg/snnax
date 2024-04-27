@@ -222,7 +222,7 @@ class SpikingNeuralNet(eqx.Module):
             @jax.vmap
             def update(_t0, y0, trans_key, bm_key):
                 ts = jnp.where(
-                    _t0 < t1 - 1 / num_save,
+                    _t0 < t1 - (t1 - t0) / (10 * num_save),
                     jnp.linspace(_t0, t1, num_save),
                     jnp.full((num_save,), _t0),
                 )
