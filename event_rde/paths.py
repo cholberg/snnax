@@ -6,25 +6,35 @@ import jax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 from diffrax import AbstractPath, BrownianIncrement, SpaceTimeLevyArea, VirtualBrownianTree
-from diffrax._brownian.tree import _levy_diff, _make_levy_val, levy_tree_transpose, linear_rescale
-from diffrax._custom_types import RealScalarLike
+from diffrax._brownian.tree import _levy_diff, _make_levy_val
+from diffrax._custom_types import RealScalarLike, levy_tree_transpose
+from diffrax._misc import linear_rescale
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree, Real
 from typing_extensions import TypeAlias
 
 _Spline: TypeAlias = Literal["sqrt", "quad", "zero"]
 
 
+def _plottable_neuron(ts, ys):
+    _, times, _ = ys.shape
+    idx = ys[:, :, 2] < 0
+    ys_flat = ys[idx]
+    ts_flat = ts[idx]
+    ts_out = jnp.linspace(ts_flat[0], ts_flat[-1], times)
+    return ys_flat[jnp.searchsorted(ts_flat, ts_out), :]
+
+
 def plottable_path(
     ts: Real[Array, "spikes times"], ys: Float[Array, "spikes neurons times 3"]
 ) -> Tuple[Real[Array, " times"], Float[Array, "neurons times 3"]]:
+    t0, t1 = ts[0, [0, -1]]
     _, neurons, times, _ = ys.shape
-    idx = jnp.max(jnp.cumsum(ys[:, :, :, 2] > 0, axis=2), axis=1) < 1
-    idx_y = jnp.tile(idx[:, None, :], (1, neurons, 1))
-    ys_flat = ys[idx_y].reshape((neurons, -1, 3))
-    ts_flat = ts[idx]
-    ts_out = jnp.linspace(ts_flat[0], ts_flat[-1], times)
-    ys_out = ys_flat[:, jnp.searchsorted(ts_flat, ts_out)]
-    return ts_out, ys_out
+    out_path = []
+    for n in range(neurons):
+        out_path.append(_plottable_neuron(ts, ys[:, n]))
+    ts = jnp.linspace(t0, t1, times)
+    ys = jnp.transpose(jnp.dstack(out_path), (2, 0, 1))
+    return ts, ys
 
 
 def interleave(arr1: Array, arr2: Array) -> Array:
@@ -43,6 +53,7 @@ def marcus_lift(
     num_neurons = spike_mask.shape[1]
     finite_spikes = jnp.where(jnp.isfinite(spike_times), spike_times, t1).reshape((-1, 1))
     spike_cumsum = jnp.cumsum(spike_mask, axis=0)
+    # last_spike_time = jnp.max(jnp.where(spike_times < t1, spike_times, -jnp.inf))
     spike_cumsum_shift = jnp.roll(spike_cumsum, 1, axis=0)
     spike_cumsum_shift = spike_cumsum_shift.at[0, :].set(
         jnp.zeros(num_neurons, dtype=spike_cumsum_shift.dtype)
@@ -53,7 +64,58 @@ def marcus_lift(
     # Makes sure the path starts at t0
     out = jnp.roll(out, 1, axis=0)
     out = out.at[0, :].set(jnp.insert(jnp.zeros(num_neurons), 0, t0))
+    # time_capped = jnp.where(out[:, 0] < t1, out[:, 0], last_spike_time)
+    # out = out.at[:, 0].set(time_capped)
     return out
+
+
+@eqx.filter_jit
+def cap_fill_ravel(ts, ys, spike_cap=10):
+    # Cap the number of spikes
+    ys_capped = ys[:spike_cap]
+    ts_capped = ts[:spike_cap]
+    spikes, neurons, times, _ = ys_capped.shape
+
+    # Fill up infs
+    idx = ts_capped > ts_capped[:, -1, None]
+    idx_y = jnp.tile(idx[:, None, :, None], (1, neurons, 1, 3))
+    ts_capped = jnp.where(idx, ts_capped[:, -1, None], ts_capped)
+    ys_capped = jnp.where(idx_y, ys_capped[:, :, -1, None, :], ys_capped)
+
+    xs = (ts_capped, ys_capped)
+    carry_ys = jnp.zeros((neurons, times, 3))
+    carr_ts = jnp.array(0.0)
+    carry = (carr_ts, carry_ys)
+
+    def _fill(carry, x):
+        _ts, _ys = x
+        carry_ts, carry_ys = carry
+        _ys_fill_val = jnp.tile(_ys[:, None, -1], (1, times, 1))
+        _ts_fill_val = _ts[-1]
+        _ys_out = jnp.where(jnp.isinf(_ys), _ys_fill_val, _ys)
+        _ts_out = jnp.where(jnp.isinf(_ts), _ts_fill_val, _ts)
+        assert isinstance(_ys_out, Array)
+        _ys_all_inf = jnp.all(jnp.isinf(_ys_out))
+        _ts_all_inf = jnp.all(jnp.isinf(_ts_out))
+        _ys_out = jnp.where(_ys_all_inf, carry_ys, _ys_out)
+        _ts_out = jnp.where(_ts_all_inf, carry_ts, _ts_out)
+        assert isinstance(_ys_out, Array)
+        new_carry_ys = jnp.tile(_ys_out[:, None, -1], (1, times, 1))
+        new_carry_ts = _ts_out[-1]
+        new_carry = (new_carry_ts, new_carry_ys)
+        out = (_ts_out, _ys_out)
+        return new_carry, out
+
+    _, xs_filled_capped = jax.lax.scan(_fill, carry, xs=xs)
+    ts_filled_capped, ys_filled_capped = xs_filled_capped
+
+    # Ravel out the "spikes" dimension
+    # (spikes, neurons, times, 3) -> (neurons, spikes, times, 3)
+    ys_filled_capped = jnp.transpose(ys_filled_capped, (1, 0, 2, 3))
+    # (spikes, neurons, times, 3) -> (neurons, spikes*times, 3)
+    ys_filled_capped_ravelled = ys_filled_capped.reshape((neurons, -1, 3))
+    ts_filled_capped_ravelled = jnp.ravel(ts_filled_capped)
+    return ts_filled_capped_ravelled, ys_filled_capped_ravelled
 
 
 class SpikeTrain(AbstractPath):

@@ -7,7 +7,6 @@ import equinox.internal as eqxi
 import jax
 import jax.numpy as jnp
 import jax.random as jr
-import jax.tree_util as jtu
 import numpy as np
 import optimistix as optx
 from jax.typing import ArrayLike
@@ -34,35 +33,11 @@ def buffers(state: NetworkState):
     return state.tevents, state.ts, state.ys, state.event_types
 
 
-def _build_w(w, network, key):
+def _build_w(w, network, key, minval, maxval):
     if w is not None:
         return w
-    w_a = jr.uniform(key, network.shape, minval=0.5)
+    w_a = jr.uniform(key, network.shape, minval=minval, maxval=maxval)
     return w_a.at[network].set(0.0)
-
-
-def _inner_trans_fn(ev_outer, w, y, event_mask, key, v_reset):
-    def _for_inner(_w, _y, ev_inner, ev_outer):
-        v, i, s = _y
-        s_key = jr.fold_in(key, v)
-        v_out = jnp.where(ev_inner, v - v_reset, v)
-        i_out = jnp.where(ev_inner, i, i + _w)
-        s_out = jnp.where(ev_inner, jnp.log(jr.uniform(s_key)) - 1e-2, s)
-        y_out = jnp.array([v_out, i_out, s_out])
-        return jnp.where(ev_outer, y_out, jnp.full_like(y_out, 0.0))
-
-    def _for_inner_fill(_y, ev_inner, ev_outer):
-        v, i, s = _y
-        s_key = jr.fold_in(key, v)
-        v_out = jnp.where(ev_inner, v - v_reset, v)
-        s_out = jnp.where(ev_inner, jnp.log(jr.uniform(s_key)) - 1e-2, s)
-        y_out = jnp.array([v_out, i, s_out])
-        return jnp.where(ev_outer, y_out, jnp.full_like(y_out, 0.0))
-
-    out = jtu.tree_map(ft.partial(_for_inner, ev_outer=ev_outer), w, y, event_mask)
-    out_fill = jtu.tree_map(ft.partial(_for_inner_fill, ev_outer=ev_outer), y, event_mask)
-    out = eqx.combine(out, out_fill)
-    return out
 
 
 class SpikingNeuralNet(eqx.Module):
@@ -86,6 +61,8 @@ class SpikingNeuralNet(eqx.Module):
         alpha: Float = 3e-2,
         w: Optional[Float[Array, "neurons neurons"]] = None,
         network: Optional[Bool[ArrayLike, "neurons neurons"]] = None,
+        wmin: Float = 0.5,
+        wmax: Float = 1.0,
         mu: Optional[Float[ArrayLike, " 2"]] = None,
         diffusion: bool = False,
         sigma: Optional[Float[ArrayLike, "2 2"]] = None,
@@ -104,7 +81,7 @@ class SpikingNeuralNet(eqx.Module):
         if network is None:
             network = np.full((num_neurons, num_neurons), False)
 
-        self.w = _build_w(w, network, w_key)
+        self.w = _build_w(w, network, w_key, wmin, wmax)
         self.network = network
 
         if mu is None:
@@ -117,14 +94,12 @@ class SpikingNeuralNet(eqx.Module):
 
             @jax.vmap
             def _vf(y, ic):
-                # y = eqx.error_if(y, jnp.any(jnp.isnan(y) | jnp.isinf(y)), f"{y}")
                 mu1, mu2 = self.mu  # type: ignore
                 v, i, _ = y
                 v_out = mu1 * (i + ic - v)
                 i_out = -mu2 * i
                 s_out = self.intensity_fn(v)
                 out = jnp.array([v_out, i_out, s_out])
-                # out = eqx.error_if(out, jnp.any(jnp.isnan(out) | jnp.isinf(out)), "dxdt")
                 return out
 
             return _vf(y, ic)
@@ -175,7 +150,9 @@ class SpikingNeuralNet(eqx.Module):
         _t0 = jnp.full((num_samples,), t0)
         key, bm_key, init_key = jr.split(key, 3)
         s0_key, i0_key, v0_key = jr.split(init_key, 3)
-        s0 = jnp.log(jr.uniform(s0_key, (num_samples, self.num_neurons))) - self.alpha
+        # to ensure that s0 != -inf, we set minval=1e-10
+        s0 = jnp.log(jr.uniform(s0_key, (num_samples, self.num_neurons), minval=1e-10)) - self.alpha
+        s0 = eqx.error_if(s0, jnp.any(jnp.isinf(s0)), "s0 is inf")
         if v0 is None:
             v0 = jr.uniform(
                 v0_key, (num_samples, self.num_neurons), minval=0.0, maxval=self.v_reset
@@ -199,7 +176,7 @@ class SpikingNeuralNet(eqx.Module):
         vf = diffrax.ODETerm(self.drift_vf)
         root_finder = optx.Newton(1e-2, 1e-2, optx.rms_norm)
         event = diffrax.Event(self.cond_fn, root_finder)
-        solver = diffrax.Heun()
+        solver = diffrax.Euler()
         w_update = self.w.at[self.network].set(0.0)
         # bm_key is not updated in body_fun since we want to make sure that the same Brownian path
         # is used for before and after each spike.
@@ -210,7 +187,7 @@ class SpikingNeuralNet(eqx.Module):
             v, i, s = y
             v_out = v - jnp.where(ev, self.v_reset, 0.0)
             i_out = i + w
-            s_out = jnp.where(ev, jnp.log(jr.uniform(key)) - self.alpha, s)
+            s_out = jnp.where(ev, jnp.log(jr.uniform(key, minval=1e-10)) - self.alpha, s)
             # ensures that s_out does not exceed 0 in cases where two events are triggered
             s_out = jnp.minimum(s_out, -1e-3)
             return jnp.array([v_out, i_out, s_out])
@@ -257,11 +234,16 @@ class SpikingNeuralNet(eqx.Module):
                 event_array = jnp.array(event_mask)
 
                 assert sol.ts is not None
-                tevent = jnp.abs(sol.ts[-1])  # if t0 == t1 this would otherwise be negative
+                ts = sol.ts
+                # Diffrax flips the sign of ts when t0 >= t1
+                ts = jnp.where(t1 <= _t0, -ts, ts)
+                tevent = ts[-1]
+                tevent = eqxi.error_if(tevent, jnp.isnan(tevent), "tevent is nan")
 
                 assert sol.ys is not None
-                ys = jnp.where(_t0 < t1, sol.ys, jnp.tile(y0[None, :], (num_save, 1, 1)))
+                ys = sol.ys
                 yevent = ys[-1].reshape((self.num_neurons, 3))
+                yevent = jnp.where(_t0 < t1, yevent, y0)
                 yevent = eqxi.error_if(yevent, jnp.any(jnp.isnan(yevent)), "yevent is nan")
                 yevent = eqxi.error_if(yevent, jnp.any(jnp.isinf(yevent)), "yevent is inf")
                 event_idx = jnp.argmax(jnp.array(event_mask))
@@ -270,7 +252,7 @@ class SpikingNeuralNet(eqx.Module):
                 ).reshape((-1,))
                 w_update_row = jnp.where(event_happened, w_update_row, 0.0)
                 ytrans = trans_fn(yevent, w_update_row, event_array, trans_key)
-                ys = ys.reshape((self.num_neurons, num_save, 3))  # pyright: ignore
+                ys = jnp.transpose(ys, (1, 0, 2))
 
                 return ts, ys, tevent, ytrans, event_array
 
@@ -345,7 +327,7 @@ def _build_forward_network(in_size, out_size, width_size, depth):
     num_neurons = in_size + width_size * (depth - 1) + out_size
     network_out = np.full((num_neurons, num_neurons), True)
     layer_idx = [0] + [in_size] + [width_size] * (depth - 1) + [out_size]
-    layer_idx = np.cumsum(jnp.array(layer_idx))
+    layer_idx = np.cumsum(np.array(layer_idx))
     for i in range(depth):
         lrows = layer_idx[i]
         urows = layer_idx[i + 1]
@@ -362,31 +344,43 @@ class FeedForwardSNN(SpikingNeuralNet):
     width_size: Int
     depth: Int
 
-    def __init__(self, in_size, out_size, width_size, depth, intensity_fn, key, diffusion=False):
+    def __init__(self, in_size, out_size, width_size, depth, intensity_fn, key, **kwargs):
         self.in_size = in_size
         self.out_size = out_size
         self.width_size = width_size
         self.depth = depth
         num_neurons = self.in_size + self.width_size * (self.depth - 1) + self.out_size
         network = _build_forward_network(self.in_size, self.out_size, self.width_size, self.depth)
-        super().__init__(num_neurons, intensity_fn, network=network, key=key, diffusion=diffusion)
+        super().__init__(
+            num_neurons=num_neurons, intensity_fn=intensity_fn, network=network, key=key, **kwargs
+        )
 
     def __call__(
         self,
         input_current: Callable[..., Float[Array, " input_size"]],
         t0: Real,
         t1: Real,
-        ts: Float[ArrayLike, ""],
-        v0: Float[ArrayLike, " neurons"],
-        i0: Float[ArrayLike, " neurons"],
         max_spikes: int,
         num_samples: int,
+        *,
+        v0: Real[ArrayLike, " neurons"],
+        i0: Real[ArrayLike, " neurons"],
         key: Any,
         num_save: int = 2,
+        dt0: Real = 0.01,
     ):
         def _input_current(t: Float) -> Array:
             return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
 
         return super().__call__(
-            _input_current, t0, t1, max_spikes, num_samples, key=key, num_save=num_save
+            _input_current,
+            t0,
+            t1,
+            max_spikes,
+            num_samples,
+            key=key,
+            v0=v0,
+            i0=i0,
+            num_save=num_save,
+            dt0=dt0,
         )

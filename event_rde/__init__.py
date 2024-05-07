@@ -1,10 +1,13 @@
-from .losses import coord_spikes as coord_spikes
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
 from .losses import first_spike_loss as first_spike_loss
+from .losses import get_n_first_spikes as get_n_first_spikes
+from .losses import signature_mmd as signature_mmd
 from .losses import spike_MAE_loss as spike_MAE_loss
+from .losses import spike_MSE_loss as spike_MSE_loss
 from .paths import BrownianPath as BrownianPath
 from .paths import SpikeTrain as SpikeTrain
+from .paths import cap_fill_ravel as cap_fill_ravel
 from .paths import marcus_lift as marcus_lift
 from .paths import plottable_path as plottable_path
 from .snn import FeedForwardSNN as FeedForwardSNN
