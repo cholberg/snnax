@@ -1,3 +1,4 @@
+from .helpers import generate_weights as generate_weights
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
 from .losses import first_spike_loss as first_spike_loss
