@@ -50,6 +50,20 @@ def marcus_lift(
     spike_times: Float[Array, " max_spikes"],
     spike_mask: Float[Array, "max_spikes num_neurons"],
 ) -> Float[Array, " 2_max_spikes"]:
+    """Lifts a spike train to a path to a discretisation of the Marcus lift
+    (with time augmentation).
+
+    **Arguments**:
+
+    - `t0`: The start time of the path.
+    - `t1`: The end time of the path.
+    - `spike_times`: The times of the spikes.
+    - `spike_mask`: A mask indicating the corresponding spiking neuron.
+
+    **Returns**:
+
+    - An array of shape `(2 * max_spikes, num_neurons + 1)` representing the Marcus lift.
+    """
     num_neurons = spike_mask.shape[1]
     finite_spikes = jnp.where(jnp.isfinite(spike_times), spike_times, t1).reshape((-1, 1))
     spike_cumsum = jnp.cumsum(spike_mask, axis=0)

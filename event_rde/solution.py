@@ -3,6 +3,8 @@ from jaxtyping import Array, Float, Real
 
 
 class Solution(eqx.Module):
+    """Solution of the event-driven model."""
+
     t1: Real
     ys: Float[Array, "samples spikes neurons times 3"]
     ts: Float[Array, "samples spikes neurons times"]

@@ -41,6 +41,8 @@ def _build_w(w, network, key, minval, maxval):
 
 
 class SpikingNeuralNet(eqx.Module):
+    """A class representing a generic stochastic spiking neural network."""
+
     num_neurons: Int
     w: Float[Array, "neurons neurons"]
     network: Bool[ArrayLike, "neurons neurons"] = eqx.field(static=True)
@@ -68,6 +70,30 @@ class SpikingNeuralNet(eqx.Module):
         sigma: Optional[Float[ArrayLike, "2 2"]] = None,
         key: Optional[Any] = None,
     ):
+        """**Arguments**:
+
+        - `num_neurons`: The number of neurons in the network.
+        - `intensity_fn`: The intensity function for spike generation.
+            Should take as input a scalar (voltage) and return a scalar (intensity).
+        - `v_reset`: The reset voltage value for neurons. Defaults to 1.0.
+        - `alpha`: Constant controlling the refractory period. Defaults to 3e-2.
+        - `w`: The initial weight matrix. Should be a square matrix of size `num_neurons`.
+            If none, the weights are randomly intialized for all entries in `self.network`
+            that are False.
+        - `network`: The connectivity matrix of the network. Shuold be a square matrix of size
+            `num_neurons` with the $ij$'th element being `False` if there is no connection from
+            neuron $i$ to neuron $j$. If none is provided, the network is fully connected.
+        - `wmin`: The minimum weight value for random initialization. Defaults to 0.5.
+        - `wmax`: The maximum weight value for random initialization. Defaults to 1.0.
+        - `mu`: A 2-dimensional vector describing the drift term of each neuron.
+            If none is provided, the values are randomly initialized.
+        - `diffusion`: Whether to include diffusion term in the SDE. Defaults to False.
+        - `sigma`: A 2 by 2 diffusion matrix. If none is provided, the values are randomly
+            initialized.
+        - `key`: The random key for initialization. If None,
+            the key is set to `jax.random.PRNGKey(0)`.
+        """
+
         self.num_neurons = num_neurons
         self.intensity_fn = intensity_fn
         self.v_reset = v_reset
@@ -146,6 +172,33 @@ class SpikingNeuralNet(eqx.Module):
         dt0=0.01,
         max_steps=1000,
     ):
+        """**Arguments:**
+
+            `input_current`: The input current to the SNN model. Should be a function
+                taking as input a scalar time value and returning a vector of size
+                `self.num_neurons`.
+            `t0`: The starting time of the simulation.
+            `t1`: The ending time of the simulation.
+            `max_spikes`: The maximum number of spikes allowed in the simulation.
+            `num_samples`: The number of samples to simulate.
+            `key`: The random key used for generating random numbers.
+            `v0`: The initial membrane potential of the neurons. If None,
+                it will be randomly generated. Otherwise, it should be a vector of shape
+                `(num_samples, self.num_neurons)`.
+            `i0`: The initial membrane potential of the neurons. If None,
+                it will be randomly generated. Otherwise, it should be a vector of shape
+                `(num_samples, self.num_neurons)`.
+            `num_save`: The number of time points to save per spike during the simulation.
+            `dt0`: The time step size used in the differential equation solve.
+            `max_steps`: The maximum number of steps allowed in the differential equation solve.
+
+        **Returns:**
+
+            `Solution`: An object containing the simulation results,
+                including the time points, membrane potentials,
+                 spike times, spike marks, and the number of spikes.
+        """
+
         t0, t1 = float(t0), float(t1)
         _t0 = jnp.full((num_samples,), t0)
         key, bm_key, init_key = jr.split(key, 3)
@@ -271,12 +324,6 @@ class SpikingNeuralNet(eqx.Module):
             tevents = state.tevents
             tevents = tevents.at[:, state.num_spikes].set(tevent)
 
-            """update_mask = jnp.array((t_seq > _t0) & (t_seq <= tevent)).reshape((-1,))
-            update_mask = jnp.tile(update_mask, (3, self.num_neurons, 1)).T
-            ys = sol.ys
-            ys = jnp.where(update_mask, ys, state.ys)
-            ys = ys.at[jnp.sum(state.ts < _t0)].set(_y0)  # pyright: ignore"""
-
             new_state = NetworkState(
                 ts=ts,
                 ys=ys,
@@ -339,12 +386,25 @@ def _build_forward_network(in_size, out_size, width_size, depth):
 
 
 class FeedForwardSNN(SpikingNeuralNet):
+    """A convenience wrapper around `SpikingNeuralNet` for a feedforward network."""
+
     in_size: Int
     out_size: Int
     width_size: Int
     depth: Int
 
     def __init__(self, in_size, out_size, width_size, depth, intensity_fn, key, **kwargs):
+        """**Arguments**:
+
+        - `in_size`: The number of input neurons.
+        - `out_size`: The number of output neurons.
+        - `width_size`: The number of neurons in each hidden layer.
+        - `depth`: The number of hidden layers.
+        - `intensity_fn`: The intensity function for spike generation.
+            Should take as input a scalar (voltage) and return a scalar (intensity).
+        - `key`: The random key for initialization.
+        - `**kwargs`: Additional keyword arguments passed to `SpikingNeuralNet`.
+        """
         self.in_size = in_size
         self.out_size = out_size
         self.width_size = width_size
@@ -369,6 +429,30 @@ class FeedForwardSNN(SpikingNeuralNet):
         num_save: int = 2,
         dt0: Real = 0.01,
     ):
+        """**Arguments**:
+
+        - `input_current`: The input current to the SNN model. Should be a function
+            taking as input a scalar time value and returning a vector of size
+            `self.in_size`.
+        - `t0`: The starting time of the simulation.
+        - `t1`: The ending time of the simulation.
+        - `max_spikes`: The maximum number of spikes allowed in the simulation.
+        - `num_samples`: The number of samples to simulate.
+        - `key`: The random key used for generating random numbers.
+        - `v0`: The initial membrane potential of the neurons. Should be a vector of shape
+            `(num_samples, self.num_neurons)`.
+        - `i0`: The initial membrane potential of the neurons. Should be a vector of shape
+            `(num_samples, self.num_neurons)`.
+        - `num_save`: The number of time points to save per spike during the simulation.
+        - `dt0`: The time step size used in the differential equation solve.
+
+        **Returns:**
+
+            `Solution`: An object containing the simulation results,
+                including the time points, membrane potentials,
+                 spike times, spike marks, and the number of spikes.
+        """
+
         def _input_current(t: Float) -> Array:
             return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
 

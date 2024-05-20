@@ -30,21 +30,25 @@ def expected_signature_loss(
     depth: int,
     match_spikes: bool = True,
 ) -> Real:
+    """Compute the signature kernel MMD between two batches sets of spike trains.
+
+    **Arguments**:
+
+    - `y_1`: A batch of spike trains of shape `[..., dim]`.
+    - `y_2`: Another batch of spike trains of shape `[..., dim]`.
+    - `depth`: The truncation depth of the signature kernel.
+    - `match_spikes`: Whether to match the number of spikes in the two batches.
+
+    **Returns**:
+
+    - A real number representing the signature kernel MMD between the two batches.
+    """
     if match_spikes:
         spike_counts_1 = jnp.max(y_1[:, :, 1:], axis=1)
         spike_counts_2 = jnp.max(y_2[:, :, 1:], axis=1)
         spike_counts = jnp.minimum(spike_counts_1, spike_counts_2)
-        # sc_max_1 = jnp.max(spike_counts_1, axis=1)
-        # sc_max_2 = jnp.max(spike_counts_2, axis=1)
-        # sc_max = jnp.max(spike_counts, axis=1)
-
         y_1 = y_1.at[:, :, 1:].set(jax.vmap(jnp.minimum)(y_1[:, :, 1:], spike_counts))
-        # capped_st_1 = cap_spike_times(y_1[:, :, 0], sc_max_1, sc_max)
-        # y_1_trunc = y_1_trunc.at[:, :, 0].set(capped_st_1)
-
         y_2 = y_2.at[:, :, 1:].set(jax.vmap(jnp.minimum)(y_2[:, :, 1:], spike_counts))
-        # capped_st_2 = cap_spike_times(y_2[:, :, 0], sc_max_2, sc_max)
-        # y_2_trunc = y_2_trunc.at[:, :, 0].set(capped_st_2)
 
     sig_1 = expected_signature(y_1, depth)
     sig_2 = expected_signature(y_2, depth)
@@ -65,17 +69,8 @@ def signature_mmd(
         spike_counts_1 = jnp.max(y_1[:, :, 1:], axis=1)
         spike_counts_2 = jnp.max(y_2[:, :, 1:], axis=1)
         spike_counts = jnp.minimum(spike_counts_1, spike_counts_2)
-        # sc_max_1 = jnp.max(spike_counts_1, axis=1)
-        # sc_max_2 = jnp.max(spike_counts_2, axis=1)
-        # sc_max = jnp.max(spike_counts, axis=1)
-
         y_1 = y_1.at[:, :, 1:].set(jax.vmap(jnp.minimum)(y_1[:, :, 1:], spike_counts))
-        # capped_st_1 = cap_spike_times(y_1[:, :, 0], sc_max_1, sc_max)
-        # y_1_trunc = y_1_trunc.at[:, :, 0].set(capped_st_1)
-
         y_2 = y_2.at[:, :, 1:].set(jax.vmap(jnp.minimum)(y_2[:, :, 1:], spike_counts))
-        # capped_st_2 = cap_spike_times(y_2[:, :, 0], sc_max_2, sc_max)
-        # y_2_trunc = y_2_trunc.at[:, :, 0].set(capped_st_2)
     if scales is None:
         scales = jnp.ones((dim,))
     sig_kernel = sigkerax.sigkernel.SigKernel(
@@ -104,16 +99,20 @@ def get_n_first_spikes(
 
 
 @eqx.filter_jit
-def first_spike_loss(y_1: Float[Array, "... dim"], y_2: Float[Array, "... dim"]) -> Real:
-    first_spikes_1 = get_n_first_spikes(y_1, 1)
-    avg_first_spikes_1 = jnp.mean(first_spikes_1, axis=0)
-    first_spikes_2 = get_n_first_spikes(y_2, 1)
-    avg_first_spikes_2 = jnp.mean(first_spikes_2, axis=0)
-    return jnp.mean((avg_first_spikes_1 - avg_first_spikes_2) ** 2)
-
-
-@eqx.filter_jit
 def spike_MAE_loss(y_1: Float[Array, "... dim"], y_2: Float[Array, "... dim"], n: int) -> Real:
+    """Compute the mean absolute error between the average $n$ first spike times
+    of two batches of spike trains.
+
+    **Arguments**:
+
+    - `y_1`: A batch of spike trains of shape `[..., dim]`.
+    - `y_2`: Another batch of spike trains of shape `[..., dim]`.
+    - `n`: The number of first spikes to consider.
+
+    **Returns**:
+
+    - A real number representing the mean absolute error between the average $n$ first spike times.
+    """
     first_spikes = get_n_first_spikes(y_1, n)
     avg_first_spikes_1 = jnp.mean(first_spikes, axis=0)
     first_spikes = get_n_first_spikes(y_2, n)
@@ -123,6 +122,19 @@ def spike_MAE_loss(y_1: Float[Array, "... dim"], y_2: Float[Array, "... dim"], n
 
 @eqx.filter_jit
 def spike_MSE_loss(y_1: Float[Array, "... dim"], y_2: Float[Array, "... dim"], n: int) -> Real:
+    """Compute the mean squared error between the average $n$ first spike times
+    of two batches of spike trains.
+
+    **Arguments**:
+
+    - `y_1`: A batch of spike trains of shape `[..., dim]`.
+    - `y_2`: Another batch of spike trains of shape `[..., dim]`.
+    - `n`: The number of first spikes to consider.
+
+    **Returns**:
+
+    - A real number representing the mean squared error between the average $n$ first spike times.
+    """
     first_spikes = get_n_first_spikes(y_1, n)
     avg_first_spikes_1 = jnp.mean(first_spikes, axis=0)
     first_spikes = get_n_first_spikes(y_2, n)
