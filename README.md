@@ -35,7 +35,7 @@ Until the new event-handling is officially a part of diffrax, you will need to i
 
 ```
 git clone https://github.com/cholberg/diffrax/tree/dev
-cd snnax
+cd diffrax
 pip install .
 ```
 
