@@ -9,11 +9,22 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import optimistix as optx
+from jax._src.ad_util import stop_gradient_p
+from jax.interpreters import ad
 from jax.typing import ArrayLike
 from jaxtyping import Array, Bool, Float, Int, Real
 
 from .paths import BrownianPath
 from .solution import Solution
+
+
+# Work around JAX issue #22011,
+# as well as https://github.com/patrick-kidger/diffrax/pull/387#issuecomment-2174488365
+def stop_gradient_transpose(ct, x):
+    return (ct,)
+
+
+ad.primitive_transposes[stop_gradient_p] = stop_gradient_transpose
 
 
 class NetworkState(eqx.Module):
@@ -151,7 +162,7 @@ class SpikingNeuralNet(eqx.Module):
             self.sigma = None
             self.diffusion_vf = None
 
-        def cond_fn(state, y, n, **kwargs):
+        def cond_fn(t, y, args, n, **kwargs):
             return y[n, 2]
 
         self.cond_fn = [ft.partial(cond_fn, n=n) for n in range(self.num_neurons)]
@@ -159,24 +170,24 @@ class SpikingNeuralNet(eqx.Module):
     @eqx.filter_jit
     def __call__(
         self,
-        input_current,
-        t0,
-        t1,
-        max_spikes,
-        num_samples,
+        input_current: Callable[..., Float[Array, " neurons"]],
+        t0: Real,
+        t1: Real,
+        max_spikes: Int,
+        num_samples: Int,
         *,
         key,
-        v0=None,
-        i0=None,
-        num_save=2,
-        dt0=0.01,
-        max_steps=1000,
+        v0: Optional[Float[Array, "samples neurons"]] = None,
+        i0: Optional[Float[Array, "samples neurons"]] = None,
+        num_save: Int = 2,
+        dt0: Real = 0.01,
+        max_steps: Int = 1000,
     ):
         """**Arguments:**
 
             `input_current`: The input current to the SNN model. Should be a function
-                taking as input a scalar time value and returning a vector of size
-                `self.num_neurons`.
+                taking as input a scalar time value and returning an array of shape
+                `(self.num_neurons,)` or `(num_samples, self.num_neurons)`.
             `t0`: The starting time of the simulation.
             `t1`: The ending time of the simulation.
             `max_spikes`: The maximum number of spikes allowed in the simulation.
@@ -198,6 +209,17 @@ class SpikingNeuralNet(eqx.Module):
                 including the time points, membrane potentials,
                  spike times, spike marks, and the number of spikes.
         """
+        # Check that input current is of correct shape
+        ic_shape = jax.eval_shape(input_current, 0)
+        assert (ic_shape.shape == (self.num_neurons,)) | (
+            ic_shape.shape == (num_samples, self.num_neurons)
+        )
+
+        # Check that v0 and i0 are of the correct shape
+        if v0 is not None:
+            assert v0.shape == (num_samples, self.num_neurons)
+        if i0 is not None:
+            assert i0.shape == (num_samples, self.num_neurons)
 
         t0, t1 = float(t0), float(t1)
         _t0 = jnp.full((num_samples,), t0)
@@ -225,7 +247,20 @@ class SpikingNeuralNet(eqx.Module):
             ts, ys, tevents, _t0, y0, num_spikes, event_mask, event_types, key
         )
 
-        # stepsize_controller = diffrax.PIDController(rtol=1e-5, atol=1e-5)
+        # Since we also vmap over input currents, we need to make sure that `input_current`
+        # also returns an array of shape `(num_samples, self.num_neurons)`.
+        if len(ic_shape) == 1:
+
+            def _input_current(t):
+                return jnp.tile(input_current(t), (num_samples, 1))
+        else:
+            _input_current = input_current
+
+        stepsize_controller = (
+            diffrax.ConstantStepSize()
+            if self.sigma is None
+            else diffrax.PIDController(rtol=1e-5, atol=1e-5)
+        )
         vf = diffrax.ODETerm(self.drift_vf)
         root_finder = optx.Newton(1e-2, 1e-2, optx.rms_norm)
         event = diffrax.Event(self.cond_fn, root_finder)
@@ -236,13 +271,13 @@ class SpikingNeuralNet(eqx.Module):
         bm_key = jr.split(bm_key, num_samples)
 
         @jax.vmap
-        def trans_fn(y, w, ev, key):
+        def trans_fn(y, w, key):
             v, i, s = y
-            v_out = v - jnp.where(ev, self.v_reset, 0.0)
-            i_out = i + w
-            s_out = jnp.where(ev, jnp.log(jr.uniform(key, minval=1e-10)) - self.alpha, s)
+            v_out = v - jnp.where(s > -1e-3, self.v_reset, 0.0)
+            i_out = i + jnp.sum(w)
+            s_out = jnp.where(s > -1e-3, jnp.log(jr.uniform(key, minval=1e-10)) - self.alpha, s)
             # ensures that s_out does not exceed 0 in cases where two events are triggered
-            s_out = jnp.minimum(s_out, -1e-3)
+            # s_out = jnp.minimum(s_out, -1e-3)
             return jnp.array([v_out, i_out, s_out])
 
         def body_fun(state: NetworkState) -> NetworkState:
@@ -250,7 +285,7 @@ class SpikingNeuralNet(eqx.Module):
             trans_key = jr.split(trans_key, num_samples)
 
             @jax.vmap
-            def update(_t0, y0, trans_key, bm_key):
+            def update(_t0, y0, current_idx, trans_key, bm_key):
                 ts = jnp.where(
                     _t0 < t1 - (t1 - t0) / (10 * num_save),
                     jnp.linspace(_t0, t1, num_save),
@@ -258,7 +293,9 @@ class SpikingNeuralNet(eqx.Module):
                 )
                 ts = eqxi.error_if(ts, ts[1:] < ts[:-1], "ts must be increasing")
                 trans_key = jr.split(trans_key, self.num_neurons)
-                saveat = diffrax.SaveAt(ts=ts)
+                saveat_ts = diffrax.SubSaveAt(ts=ts)
+                saveat_t1 = diffrax.SubSaveAt(t1=True)
+                saveat = diffrax.SaveAt(subs=(saveat_ts, saveat_t1))
                 terms = vf
                 if self.diffusion_vf is not None:
                     bm = BrownianPath(
@@ -273,9 +310,9 @@ class SpikingNeuralNet(eqx.Module):
                     t1,
                     dt0,
                     y0,
-                    input_current,
-                    throw=True,
-                    # stepsize_controller=stepsize_controller,
+                    lambda t: _input_current(t)[current_idx],
+                    throw=False,
+                    stepsize_controller=stepsize_controller,
                     saveat=saveat,
                     event=event,
                     max_steps=max_steps,
@@ -284,32 +321,41 @@ class SpikingNeuralNet(eqx.Module):
                 assert sol.event_mask is not None
                 event_mask = jnp.array(sol.event_mask)
                 event_happened = jnp.any(event_mask)
-                event_array = jnp.array(event_mask)
 
                 assert sol.ts is not None
-                ts = sol.ts
-                # Diffrax flips the sign of ts when t0 >= t1
-                ts = jnp.where(t1 <= _t0, -ts, ts)
-                tevent = ts[-1]
+                ts = sol.ts[0]
+                _t1 = sol.ts[1]
+                tevent = _t1[0]
+                # If tevent > t1 we normalize to keep within range
+                tevent = jnp.where(tevent > t1, tevent * (t1 / tevent), tevent)
                 tevent = eqxi.error_if(tevent, jnp.isnan(tevent), "tevent is nan")
 
                 assert sol.ys is not None
-                ys = sol.ys
-                yevent = ys[-1].reshape((self.num_neurons, 3))
+                ys = sol.ys[0]
+                _y1 = sol.ys[1]
+                yevent = _y1[0].reshape((self.num_neurons, 3))
                 yevent = jnp.where(_t0 < t1, yevent, y0)
                 yevent = eqxi.error_if(yevent, jnp.any(jnp.isnan(yevent)), "yevent is nan")
                 yevent = eqxi.error_if(yevent, jnp.any(jnp.isinf(yevent)), "yevent is inf")
-                event_idx = jnp.argmax(jnp.array(event_mask))
-                w_update_row = jax.lax.dynamic_slice(
-                    w_update, (event_idx, 0), (1, self.num_neurons)
-                ).reshape((-1,))
-                w_update_row = jnp.where(event_happened, w_update_row, 0.0)
-                ytrans = trans_fn(yevent, w_update_row, event_array, trans_key)
+                # event_idx = jnp.argmax(jnp.array(event_mask))
+                # w_update_row = jax.lax.dynamic_slice(
+                #    w_update, (event_idx, 0), (1, self.num_neurons)
+                # ).reshape((-1,))
+                # w_update_row = jnp.where(event_happened, w_update_row, 0.0)
+                event_array = jnp.array(yevent[:, 2] > -1e-3)
+                w_update_t = jnp.where(
+                    jnp.tile(event_array, (self.num_neurons, 1)).T, w_update, 0.0
+                ).T
+                w_update_t = jnp.where(event_happened, w_update_t, 0.0)
+                ytrans = trans_fn(yevent, w_update_t, trans_key)
+                ytrans = eqx.error_if(ytrans, ~jnp.all(ytrans[:, 2] < 0), "s is not negative")
                 ys = jnp.transpose(ys, (1, 0, 2))
 
                 return ts, ys, tevent, ytrans, event_array
 
-            _ts, _ys, tevent, _ytrans, event_mask = update(state.t0, state.y0, trans_key, bm_key)
+            _ts, _ys, tevent, _ytrans, event_mask = update(
+                state.t0, state.y0, jnp.arange(num_samples), trans_key, bm_key
+            )
             num_spikes = state.num_spikes + 1
 
             ts = state.ts
@@ -349,8 +395,6 @@ class SpikingNeuralNet(eqx.Module):
             max_steps=max_spikes,
             kind="checkpointed",
         )
-
-        # ys = final_state.ys
         ys = final_state.ys
         ts = final_state.ts
         spike_times = final_state.tevents
@@ -423,8 +467,8 @@ class FeedForwardSNN(SpikingNeuralNet):
         max_spikes: int,
         num_samples: int,
         *,
-        v0: Real[ArrayLike, " neurons"],
-        i0: Real[ArrayLike, " neurons"],
+        v0: Real[Array, " neurons"],
+        i0: Real[Array, " neurons"],
         key: Any,
         num_save: int = 2,
         dt0: Real = 0.01,
@@ -432,8 +476,8 @@ class FeedForwardSNN(SpikingNeuralNet):
         """**Arguments**:
 
         - `input_current`: The input current to the SNN model. Should be a function
-            taking as input a scalar time value and returning a vector of size
-            `self.in_size`.
+            taking as input a scalar time value and returning an arrray of shape
+            `(self.in_size,)` or `(num_samples, self.in_size)`.
         - `t0`: The starting time of the simulation.
         - `t1`: The ending time of the simulation.
         - `max_spikes`: The maximum number of spikes allowed in the simulation.
@@ -452,9 +496,18 @@ class FeedForwardSNN(SpikingNeuralNet):
                 including the time points, membrane potentials,
                  spike times, spike marks, and the number of spikes.
         """
+        if len(jax.eval_shape(input_current, 0).shape) == 1:
 
-        def _input_current(t: Float) -> Array:
-            return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
+            def _input_current(t: Float) -> Array:
+                out = jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
+                return jnp.tile(out, (num_samples, 1))
+
+        else:
+
+            def _input_current(t: Float) -> Array:
+                return jnp.hstack(
+                    [input_current(t), jnp.zeros((num_samples, self.num_neurons - self.in_size))]
+                )
 
         return super().__call__(
             _input_current,
@@ -468,3 +521,43 @@ class FeedForwardSNN(SpikingNeuralNet):
             num_save=num_save,
             dt0=dt0,
         )
+
+
+class InputLayer(eqx.Module):
+    """A class for turning spike encodings into an input layer."""
+
+    in_size: Int
+    width_size: Int
+    w_input: Float[Array, "in_size witdth_size"]
+
+    def __init__(self, in_size, width_size, key, w_input=None):
+        """**Arguments**:
+
+        - `in_size`: The number of incoming spike trains.
+        - `width_size`: The number of neurons in first hidden layer.
+        """
+        self.in_size = in_size
+        self.width_size = width_size
+        if w_input is None:
+            w_input = jr.uniform(key, (in_size, width_size), maxval=0.05, minval=-0.02)
+        self.w_input = w_input
+
+    def __call__(
+        self,
+        spike_encodings: Float[Array, "batch_size in_size"],
+    ):
+        """**Arguments**:
+
+        - `spike_encoding`: The spike encoding of shape `(batch_size, in_size)`.
+
+        **Returns**:
+
+        - `input_current`: A function that takes as argument a scalar time `t`
+            and returns an array of shape `(batch_size, width_size)`.
+        """
+
+        def input_current(t):
+            spikes = jnp.where(spike_encodings <= t, 1.0, 0.0)
+            return jnp.dot(spikes, self.w_input)
+
+        return input_current

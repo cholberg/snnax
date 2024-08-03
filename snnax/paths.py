@@ -12,29 +12,44 @@ from diffrax._misc import linear_rescale
 from jaxtyping import Array, Float, PRNGKeyArray, PyTree, Real
 from typing_extensions import TypeAlias
 
+from .solution import Solution
+
 _Spline: TypeAlias = Literal["sqrt", "quad", "zero"]
 
 
-def _plottable_neuron(ts, ys):
-    _, times, _ = ys.shape
-    idx = ys[:, :, 2] < 0
-    ys_flat = ys[idx]
-    ts_flat = ts[idx]
-    ts_out = jnp.linspace(ts_flat[0], ts_flat[-1], times)
-    return ys_flat[jnp.searchsorted(ts_flat, ts_out), :]
+def plottable_paths(
+    sol: Solution,
+) -> Tuple[Real[Array, "samples times"], Float[Array, "samples neurons times 3"]]:
+    """Takes an instance of `Solution` from `SpikingNeuralNet.__call__(...)` and outputs the times
+    and values of the internal neuron states in a plottable format.
 
+    **Arguments**:
 
-def plottable_path(
-    ts: Real[Array, "spikes times"], ys: Float[Array, "spikes neurons times 3"]
-) -> Tuple[Real[Array, " times"], Float[Array, "neurons times 3"]]:
-    t0, t1 = ts[0, [0, -1]]
-    _, neurons, times, _ = ys.shape
-    out_path = []
-    for n in range(neurons):
-        out_path.append(_plottable_neuron(ts, ys[:, n]))
-    ts = jnp.linspace(t0, t1, times)
-    ys = jnp.transpose(jnp.dstack(out_path), (2, 0, 1))
-    return ts, ys
+    - `sol`: An instance of `Solution` as returned from `SpikingNeuralNet.__call__(...)`.
+
+    **Returns**:
+
+    - `ts`: The time axis of the path of shape `(samples, times)`.
+    - `ys`: The values of the internal state of the neuron of shape `(samples, neurons, times, 3)`.
+    """
+
+    @jax.vmap
+    def _plottable_neuron(ts, ys):
+        t0 = ts[0, 0]
+        t1 = sol.t1
+        _, neurons, times, _ = ys.shape
+        ys = ys.transpose((1, 0, 2, 3))
+        ts_out = jnp.linspace(t0, t1, times)
+        ts_flat = ts.flatten()
+        ys_flat = ys.reshape((neurons, -1, 3))
+        sort_idx = jnp.argsort(ts_flat)
+        ts_flat = ts_flat[sort_idx]
+        ys_flat = ys_flat[:, sort_idx, :]
+        idx = jnp.searchsorted(ts_flat, ts_out)
+        ys_out = ys_flat[:, idx, :]
+        return ts_out, ys_out
+
+    return _plottable_neuron(sol.ts, sol.ys)
 
 
 def interleave(arr1: Array, arr2: Array) -> Array:
@@ -50,7 +65,7 @@ def marcus_lift(
     spike_times: Float[Array, " max_spikes"],
     spike_mask: Float[Array, "max_spikes num_neurons"],
 ) -> Float[Array, " 2_max_spikes"]:
-    """Lifts a spike train to a path to a discretisation of the Marcus lift
+    """Lifts a spike train to a discretisation of the Marcus lift
     (with time augmentation).
 
     **Arguments**:

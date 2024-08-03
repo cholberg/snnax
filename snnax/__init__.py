@@ -1,3 +1,5 @@
+from .codings import first_spike_decoding as first_spike_decoding
+from .codings import spike_latency_encoding as spike_latency_encoding
 from .helpers import generate_weights as generate_weights
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
@@ -9,8 +11,9 @@ from .paths import BrownianPath as BrownianPath
 from .paths import SpikeTrain as SpikeTrain
 from .paths import cap_fill_ravel as cap_fill_ravel
 from .paths import marcus_lift as marcus_lift
-from .paths import plottable_path as plottable_path
+from .paths import plottable_paths as plottable_paths
 from .snn import FeedForwardSNN as FeedForwardSNN
+from .snn import InputLayer as InputLayer
 from .snn import NetworkState as NetworkState
 from .snn import SpikingNeuralNet as SpikingNeuralNet
 from .snn import _build_forward_network as _build_forward_network

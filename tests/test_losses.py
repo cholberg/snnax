@@ -5,10 +5,10 @@ import jax.random as jr
 import numpy as np
 from jaxtyping import Array, Float
 
-from event_rde import (
+from snnax import (
     SpikingNeuralNet,
+    expected_signature_loss,
     marcus_lift,
-    signature_mmd,
 )
 
 SEED = 1234
@@ -61,13 +61,12 @@ def generate_data(c):
 
 def test_sig_mmd():
     spike_true = generate_data(extra_params["c"])
-    scales = jax.random.exponential(scales_key, shape=(1,))
 
     @eqx.filter_jit
     @eqx.filter_value_and_grad
     def loss(c):
         spike_pred = generate_data(c)
-        return signature_mmd(spike_true, spike_pred, scales=scales, refinement_factor=1)
+        return expected_signature_loss(spike_true, spike_pred, depth=3)
 
     c = jnp.array(1.0)
     val, grad = loss(c)
