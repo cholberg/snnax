@@ -1,13 +1,15 @@
 # snnax
 
 ## Description
-Spiking Neural Networks implemented on top of [diffrax](https://github.com/patrick-kidger/diffrax).
+Spiking Neural Networks implemented on top of [diffrax](https://github.com/patrick-kidger/diffrax). Features include:
 
-## Table of Contents
-- [Installation](#installation)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [License](#license)
+- simulating trajectories of Leaky-Integrate-and-Fire neurons;
+- stochastic firing through intensity functions;
+- Stochastic Spiking Neural Networks (SSNNs) as introduced [here](https://arxiv.org/abs/2405.13587);
+- arbitrary network structures;
+- automatic differentiation of spike times and neuronal state variables.
+
+This project is still in a very early experimental phase. Future features might include more complex neuronal dynamics, simulation of exact solutions, and custom gradients for online learning.
 
 ## Installation
 
@@ -31,19 +33,9 @@ For NVIDIA GPU:
 pip install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
-Until the new event-handling is officially a part of diffrax, you will need to install a local version with the correct modifications.
-
-```
-git clone https://github.com/cholberg/diffrax/tree/dev
-cd diffrax
-pip install .
-```
-
 ## Usage
 
-For some usage examples see the [notebooks](./notebooks/).
-
-## Contributing
+For some usage examples see the [example notebook](./notebooks/example.ipynb). To reproduce the results of [Exact Gradients for Stochastic Spiking Neural Networks Driven by Rough Signals](https://arxiv.org/abs/2405.13587) simply run the notebooks [here](./notebooks/single_neuron.ipynb) and [here](./notebooks/spiking_neural_net.ipynb).
 
 ## License
 
