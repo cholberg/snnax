@@ -176,6 +176,18 @@ class SpikeTrain(AbstractPath):
         return out
 
 
+class SingleSpikeTrain(AbstractPath):
+    t0: Real
+    t1: Real
+    spike_times: Array
+
+    def evaluate(self, t0: Real, t1: Optional[Real] = None, left: Optional[bool] = True) -> Array:
+        del left
+        if t1 is not None:
+            return self.evaluate(t1 - t0)
+        return jnp.where(self.spike_times >= t0, 1.0, 0.0)
+
+
 # A version of VirtualBrownianTree that will not throw an error when differentiated
 class BrownianPath(VirtualBrownianTree):
     @eqxi.doc_remove_args("_spline")

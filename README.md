@@ -1,6 +1,7 @@
 # snnax
 
 ## Description
+
 Spiking Neural Networks implemented on top of [diffrax](https://github.com/patrick-kidger/diffrax). Features include:
 
 - simulating trajectories of Leaky-Integrate-and-Fire neurons;
@@ -9,7 +10,9 @@ Spiking Neural Networks implemented on top of [diffrax](https://github.com/patri
 - arbitrary network structures;
 - automatic differentiation of spike times and neuronal state variables.
 
-This project is still in a very early experimental phase. Future features might include more complex neuronal dynamics, simulation of exact solutions, and custom gradients for online learning.
+This project is still in a very early experimental phase. For now everything should work more or less out of the box, but I am not sure how much I will maintain this project in the future.
+
+_One thing to note is that the latest relase of `jax` (v0.6.0) introduced a [bug](https://github.com/jax-ml/jax/pull/28150) that manifests in the current implementation. For now, installing this repository will also install v0.5.3, but I will probably update the dependencies in the future, when the fix is included._
 
 ## Installation
 
@@ -18,19 +21,12 @@ Clone the repository:
 ```
 git clone https://github.com/cholberg/snnax
 cd snnax
+```
+
+and install:
+
+```
 pip install .
-```
-
-Make sure to have jax installed. For CPU:
-
-```
-pip install "jax[cpu]"
-```
-
-For NVIDIA GPU:
-
-```
-pip install -U "jax[cuda12_pip]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 ```
 
 ## Usage

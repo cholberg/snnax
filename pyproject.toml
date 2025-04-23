@@ -1,60 +1,64 @@
-[tool.poetry]
+[project]
 name = "snnax"
 version = "0.1.0"
 description = ""
-authors = ["cholberg <cholberg24@gmail.com>"]
+authors = [{ name = "cholberg", email = "cholberg24@gmail.com" }]
 readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "jax==0.5.3",
+    "matplotlib>=3.8.3",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.29.3",
+    "equinox>=0.11.4",
+    "optimistix>=0.0.7",
+    "jaxtyping>=0.2.28",
+    "signax>=0.2.1",
+    "optax>=0.2.2",
+    "lineax>=0.0.5",
+    "diffrax>=0.7.0",
+    "scienceplots>=2.1.1",
+]
 
-[tool.poetry.dependencies]
-python = "^3.11"
-matplotlib = "^3.8.3"
-jupyter = "^1.0.0"
-ipykernel = "^6.29.3"
-equinox = "^0.11.4"
-optimistix = "^0.0.7"
-jax = "0.4.28"
-jaxtyping = "^0.2.28"
-signax = "^0.2.1"
-optax = "^0.2.2"
-lineax = "^0.0.5"
-sigkerax = "^0.2.1"
-diffrax = "^0.6.0"
-scienceplots = "^2.1.1"
-
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.3.3"
-pytest = "^8.1.1"
-pre-commit = "^3.6.2"
-pyright = "^1.1.354"
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.3.3",
+    "pytest>=8.1.1",
+    "pre-commit>=3.6.2",
+    "pyright>=1.1.354",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
 
+[tool.setuptools]
+packages = ["snnax"]
 
 [tool.ruff]
 line-length = 100
-
 exclude = ["jupyter_notebook_config.py"]
 select = [
-    "E",  # pycodestyle errors
-    "W",  # pycodestyle warnings
-    "F",  # pyflakes
-    "I",  # isort
-    "C",  # flake8-comprehensions
-    "B",  # flake8-bugbear
+    "E", # pycodestyle errors
+    "W", # pycodestyle warnings
+    "F", # pyflakes
+    "I", # isort
+    "C", # flake8-comprehensions
+    "B", # flake8-bugbear
 ]
-ignore = [
-    "F722",
-    "C901",
-]
+ignore = ["F722", "C901"]
 
 [tool.ruff.isort]
 order-by-type = true
 relative-imports-order = "closest-to-furthest"
 extra-standard-library = ["typing"]
-section-order = ["future", "standard-library", "third-party", "first-party", "local-folder"]
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
 known-first-party = []
 
 

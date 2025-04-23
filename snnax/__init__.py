@@ -4,16 +4,15 @@ from .helpers import generate_weights as generate_weights
 from .losses import expected_signature as expected_signature
 from .losses import expected_signature_loss as expected_signature_loss
 from .losses import get_n_first_spikes as get_n_first_spikes
-from .losses import signature_mmd as signature_mmd
 from .losses import spike_MAE_loss as spike_MAE_loss
 from .losses import spike_MSE_loss as spike_MSE_loss
 from .paths import BrownianPath as BrownianPath
+from .paths import SingleSpikeTrain as SingleSpikeTrain
 from .paths import SpikeTrain as SpikeTrain
 from .paths import cap_fill_ravel as cap_fill_ravel
 from .paths import marcus_lift as marcus_lift
 from .paths import plottable_paths as plottable_paths
 from .snn import FeedForwardSNN as FeedForwardSNN
-from .snn import InputLayer as InputLayer
 from .snn import NetworkState as NetworkState
 from .snn import SpikingNeuralNet as SpikingNeuralNet
 from .snn import _build_forward_network as _build_forward_network

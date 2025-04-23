@@ -1,5 +1,5 @@
 import functools as ft
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Sequence
 
 import diffrax
 import equinox as eqx
@@ -9,12 +9,12 @@ import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
 import optimistix as optx
-from jax._src.ad_util import stop_gradient_p
+from jax._src.ad_util import stop_gradient_p  # pyright: ignore
 from jax.interpreters import ad
 from jax.typing import ArrayLike
 from jaxtyping import Array, Bool, Float, Int, Real
 
-from .paths import BrownianPath
+from .paths import BrownianPath, SingleSpikeTrain
 from .solution import Solution
 
 
@@ -57,6 +57,7 @@ class SpikingNeuralNet(eqx.Module):
     num_neurons: Int
     w: Float[Array, "neurons neurons"]
     network: Bool[ArrayLike, "neurons neurons"] = eqx.field(static=True)
+    read_out_neurons: Sequence[Int]
     v_reset: Float
     alpha: Float
     mu: Float[ArrayLike, " 2"]
@@ -74,6 +75,7 @@ class SpikingNeuralNet(eqx.Module):
         alpha: Float = 3e-2,
         w: Optional[Float[Array, "neurons neurons"]] = None,
         network: Optional[Bool[ArrayLike, "neurons neurons"]] = None,
+        read_out_neurons: Optional[Sequence[Int]] = None,
         wmin: Float = 0.5,
         wmax: Float = 1.0,
         mu: Optional[Float[ArrayLike, " 2"]] = None,
@@ -121,6 +123,11 @@ class SpikingNeuralNet(eqx.Module):
         self.w = _build_w(w, network, w_key, wmin, wmax)
         self.network = network
 
+        if read_out_neurons is None:
+            read_out_neurons = []
+
+        self.read_out_neurons = read_out_neurons
+
         if mu is None:
             mu = jr.uniform(mu_key, (2,), minval=0.5)
 
@@ -137,6 +144,8 @@ class SpikingNeuralNet(eqx.Module):
                 i_out = -mu2 * i
                 s_out = self.intensity_fn(v)
                 out = jnp.array([v_out, i_out, s_out])
+                out = eqx.error_if(out, jnp.any(jnp.isnan(out)), "out is nan")
+                out = eqx.error_if(out, jnp.any(jnp.isinf(out)), "out is inf")
                 return out
 
             return _vf(y, ic)
@@ -165,7 +174,9 @@ class SpikingNeuralNet(eqx.Module):
         def cond_fn(t, y, args, n, **kwargs):
             return y[n, 2]
 
-        self.cond_fn = [ft.partial(cond_fn, n=n) for n in range(self.num_neurons)]
+        self.cond_fn = [
+            ft.partial(cond_fn, n=n) for n in range(self.num_neurons) if n not in read_out_neurons
+        ]
 
     @eqx.filter_jit
     def __call__(
@@ -177,6 +188,8 @@ class SpikingNeuralNet(eqx.Module):
         num_samples: Int,
         *,
         key,
+        input_spikes: Optional[Float[Array, "samples input_neurons"]] = None,
+        input_weights: Optional[Float[Array, "neurons input_neruons"]] = None,
         v0: Optional[Float[Array, "samples neurons"]] = None,
         i0: Optional[Float[Array, "samples neurons"]] = None,
         num_save: Int = 2,
@@ -211,9 +224,7 @@ class SpikingNeuralNet(eqx.Module):
         """
         # Check that input current is of correct shape
         ic_shape = jax.eval_shape(input_current, 0)
-        assert (ic_shape.shape == (self.num_neurons,)) | (
-            ic_shape.shape == (num_samples, self.num_neurons)
-        )
+        assert ic_shape.shape == (self.num_neurons,)
 
         # Check that v0 and i0 are of the correct shape
         if v0 is not None:
@@ -222,7 +233,7 @@ class SpikingNeuralNet(eqx.Module):
             assert i0.shape == (num_samples, self.num_neurons)
 
         t0, t1 = float(t0), float(t1)
-        _t0 = jnp.full((num_samples,), t0)
+        _t0 = jnp.broadcast_to(t0, (num_samples,))
         key, bm_key, init_key = jr.split(key, 3)
         s0_key, i0_key, v0_key = jr.split(init_key, 3)
         # to ensure that s0 != -inf, we set minval=1e-10
@@ -247,20 +258,12 @@ class SpikingNeuralNet(eqx.Module):
             ts, ys, tevents, _t0, y0, num_spikes, event_mask, event_types, key
         )
 
-        # Since we also vmap over input currents, we need to make sure that `input_current`
-        # also returns an array of shape `(num_samples, self.num_neurons)`.
-        if len(ic_shape) == 1:
-
-            def _input_current(t):
-                return jnp.tile(input_current(t), (num_samples, 1))
-        else:
-            _input_current = input_current
-
-        stepsize_controller = (
-            diffrax.ConstantStepSize()
-            if self.sigma is None
-            else diffrax.PIDController(rtol=1e-5, atol=1e-5)
-        )
+        # stepsize_controller = (
+        #    diffrax.ConstantStepSize()
+        #    if self.sigma is None
+        #    else diffrax.PIDController(rtol=1e-5, atol=1e-5)
+        # )
+        stepsize_controller = diffrax.ConstantStepSize()
         vf = diffrax.ODETerm(self.drift_vf)
         root_finder = optx.Newton(1e-2, 1e-2, optx.rms_norm)
         event = diffrax.Event(self.cond_fn, root_finder)
@@ -269,6 +272,15 @@ class SpikingNeuralNet(eqx.Module):
         # bm_key is not updated in body_fun since we want to make sure that the same Brownian path
         # is used for before and after each spike.
         bm_key = jr.split(bm_key, num_samples)
+
+        if input_weights is not None:
+            assert input_spikes is not None
+            input_dim = input_spikes.shape[1]
+            input_w_large = jnp.zeros((self.num_neurons, 3, input_dim))
+            input_w_large = input_w_large.at[:, 1, :].set(input_weights)
+
+            def input_vf(t, y, args):
+                return input_w_large
 
         @jax.vmap
         def trans_fn(y, w, key):
@@ -285,7 +297,7 @@ class SpikingNeuralNet(eqx.Module):
             trans_key = jr.split(trans_key, num_samples)
 
             @jax.vmap
-            def update(_t0, y0, current_idx, trans_key, bm_key):
+            def update(_t0, y0, trans_key, bm_key, input_spike):
                 ts = jnp.where(
                     _t0 < t1 - (t1 - t0) / (10 * num_save),
                     jnp.linspace(_t0, t1, num_save),
@@ -297,12 +309,21 @@ class SpikingNeuralNet(eqx.Module):
                 saveat_t1 = diffrax.SubSaveAt(t1=True)
                 saveat = diffrax.SaveAt(subs=(saveat_ts, saveat_t1))
                 terms = vf
+                multi_terms = []
                 if self.diffusion_vf is not None:
                     bm = BrownianPath(
                         t0 - 1, t1 + 1, tol=dt0 / 2, shape=(2, self.num_neurons), key=bm_key
                     )
                     cvf = diffrax.ControlTerm(self.diffusion_vf, bm)
-                    terms = diffrax.MultiTerm(terms, cvf)
+                    multi_terms.append(cvf)
+                if input_spike is not None:
+                    assert input_weights is not None
+                    input_st = SingleSpikeTrain(t0, t1, input_spike)
+                    input_cvf = diffrax.ControlTerm(input_vf, input_st)
+                    multi_terms.append(input_cvf)
+                if multi_terms:
+                    terms = diffrax.MultiTerm(terms, *multi_terms)
+
                 sol = diffrax.diffeqsolve(
                     terms,
                     solver,
@@ -310,7 +331,7 @@ class SpikingNeuralNet(eqx.Module):
                     t1,
                     dt0,
                     y0,
-                    lambda t: _input_current(t)[current_idx],
+                    input_current,
                     throw=False,
                     stepsize_controller=stepsize_controller,
                     saveat=saveat,
@@ -354,7 +375,7 @@ class SpikingNeuralNet(eqx.Module):
                 return ts, ys, tevent, ytrans, event_array
 
             _ts, _ys, tevent, _ytrans, event_mask = update(
-                state.t0, state.y0, jnp.arange(num_samples), trans_key, bm_key
+                state.t0, state.y0, trans_key, bm_key, input_spikes
             )
             num_spikes = state.num_spikes + 1
 
@@ -437,7 +458,17 @@ class FeedForwardSNN(SpikingNeuralNet):
     width_size: Int
     depth: Int
 
-    def __init__(self, in_size, out_size, width_size, depth, intensity_fn, key, **kwargs):
+    def __init__(
+        self,
+        in_size,
+        out_size,
+        width_size,
+        depth,
+        intensity_fn,
+        key,
+        read_out_layer=None,
+        **kwargs,
+    ):
         """**Arguments**:
 
         - `in_size`: The number of input neurons.
@@ -455,8 +486,19 @@ class FeedForwardSNN(SpikingNeuralNet):
         self.depth = depth
         num_neurons = self.in_size + self.width_size * (self.depth - 1) + self.out_size
         network = _build_forward_network(self.in_size, self.out_size, self.width_size, self.depth)
+
+        if read_out_layer:
+            read_out_neurons = list(range(num_neurons - out_size, num_neurons))
+        else:
+            read_out_neurons = None
+
         super().__init__(
-            num_neurons=num_neurons, intensity_fn=intensity_fn, network=network, key=key, **kwargs
+            num_neurons=num_neurons,
+            intensity_fn=intensity_fn,
+            network=network,
+            key=key,
+            read_out_neurons=read_out_neurons,
+            **kwargs,
         )
 
     def __call__(
@@ -467,6 +509,8 @@ class FeedForwardSNN(SpikingNeuralNet):
         max_spikes: int,
         num_samples: int,
         *,
+        input_spikes: Optional[Float[Array, "samples input_neurons"]] = None,
+        input_weights: Optional[Float[Array, "input_size input_neruons"]] = None,
         v0: Real[Array, " neurons"],
         i0: Real[Array, " neurons"],
         key: Any,
@@ -496,18 +540,18 @@ class FeedForwardSNN(SpikingNeuralNet):
                 including the time points, membrane potentials,
                  spike times, spike marks, and the number of spikes.
         """
-        if len(jax.eval_shape(input_current, 0).shape) == 1:
 
-            def _input_current(t: Float) -> Array:
-                out = jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
-                return jnp.tile(out, (num_samples, 1))
+        def _input_current(t: Float) -> Array:
+            return jnp.hstack([input_current(t), jnp.zeros((self.num_neurons - self.in_size,))])
 
+        if input_weights is not None:
+            assert input_spikes is not None
+            input_dim = input_weights.shape[1]
+            _input_weights = jnp.vstack(
+                [input_weights, jnp.zeros((self.num_neurons - self.in_size, input_dim))]
+            )
         else:
-
-            def _input_current(t: Float) -> Array:
-                return jnp.hstack(
-                    [input_current(t), jnp.zeros((num_samples, self.num_neurons - self.in_size))]
-                )
+            _input_weights = None
 
         return super().__call__(
             _input_current,
@@ -516,48 +560,10 @@ class FeedForwardSNN(SpikingNeuralNet):
             max_spikes,
             num_samples,
             key=key,
+            input_spikes=input_spikes,
+            input_weights=_input_weights,
             v0=v0,
             i0=i0,
             num_save=num_save,
             dt0=dt0,
         )
-
-
-class InputLayer(eqx.Module):
-    """A class for turning spike encodings into an input layer."""
-
-    in_size: Int
-    width_size: Int
-    w_input: Float[Array, "in_size witdth_size"]
-
-    def __init__(self, in_size, width_size, key, w_input=None):
-        """**Arguments**:
-
-        - `in_size`: The number of incoming spike trains.
-        - `width_size`: The number of neurons in first hidden layer.
-        """
-        self.in_size = in_size
-        self.width_size = width_size
-        if w_input is None:
-            w_input = jr.uniform(key, (in_size, width_size), maxval=0.05, minval=-0.02)
-        self.w_input = w_input
-
-    def __call__(
-        self,
-        spike_encodings: Float[Array, "batch_size in_size"],
-    ):
-        """**Arguments**:
-
-        - `spike_encoding`: The spike encoding of shape `(batch_size, in_size)`.
-
-        **Returns**:
-
-        - `input_current`: A function that takes as argument a scalar time `t`
-            and returns an array of shape `(batch_size, width_size)`.
-        """
-
-        def input_current(t):
-            spikes = jnp.where(spike_encodings <= t, 1.0, 0.0)
-            return jnp.dot(spikes, self.w_input)
-
-        return input_current

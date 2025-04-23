@@ -1,11 +1,8 @@
 import functools as ft
-from typing import Optional
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import sigkerax
-import sigkerax.sigkernel
 import signax
 from jaxtyping import Array, Float, Real
 
@@ -55,7 +52,7 @@ def expected_signature_loss(
     return jnp.mean((sig_1 - sig_2) ** 2)
 
 
-@eqx.filter_jit
+"""@eqx.filter_jit
 def signature_mmd(
     y_1: Float[Array, "... dim"],
     y_2: Float[Array, "... dim"],
@@ -80,6 +77,7 @@ def signature_mmd(
     k_12 = sig_kernel.kernel_matrix(y_1, y_2)
     k_22 = sig_kernel.kernel_matrix(y_2, y_2)
     return jnp.mean(k_11) + jnp.mean(k_22) - 2 * jnp.mean(k_12)
+"""
 
 
 def get_n_first_spikes(
